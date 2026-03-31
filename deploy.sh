@@ -122,13 +122,13 @@ if [[ $PHYS_CORES -lt 1 ]]; then
 fi
 ok "Physical cores: $PHYS_CORES"
 
-# Detect hybrid architecture (Intel 12th+ gen P-cores and E-cores)
+# Detect hybrid architecture (Intel 12th+ gen, Arrow Lake, etc.)
 IS_HYBRID=false
 P_CORE_COUNT=0
 E_CORE_COUNT=0
 P_CORE_LIST=""
 
-# Check for core_type sysfs (Intel Thread Director)
+# Method 1: Check core_type sysfs (Intel Thread Director)
 if [[ -f /sys/devices/system/cpu/cpu0/topology/core_type ]]; then
     P_CORES_ARR=()
     E_CORES_ARR=()
@@ -145,12 +145,51 @@ if [[ -f /sys/devices/system/cpu/cpu0/topology/core_type ]]; then
     E_CORE_COUNT=${#E_CORES_ARR[@]}
     if [[ $P_CORE_COUNT -gt 0 && $E_CORE_COUNT -gt 0 ]]; then
         IS_HYBRID=true
-        # Build comma-separated P-core list (minus last 2 for system)
-        MINING_P_CORES=("${P_CORES_ARR[@]:0:$((P_CORE_COUNT - 2))}")
-        P_CORE_LIST=$(IFS=,; echo "${MINING_P_CORES[*]}")
-        ok "Hybrid CPU: ${P_CORE_COUNT} P-cores, ${E_CORE_COUNT} E-cores"
-        info "Mining will use P-cores only (better L2 cache per thread)"
     fi
+fi
+
+# Method 2: Detect by CPU model name if sysfs didn't work
+# Intel Core Ultra / 12th-14th gen / Arrow Lake are all hybrid
+if [[ "$IS_HYBRID" == "false" ]]; then
+    if echo "$CPU_MODEL" | grep -qiE "(Ultra [579]|12[0-9]{2}|13[0-9]{2}|14[0-9]{2}|275HX|285K)"; then
+        IS_HYBRID=true
+        # Intel hybrid CPUs: P-cores are typically listed first in lscpu
+        # Arrow Lake / Ultra 9 275HX: 8 P-cores + 16 E-cores = 24 cores/24 threads
+        # 13th/14th gen i9: 8 P-cores(HT) + 16 E-cores = 24 cores/32 threads
+        # Heuristic: if logical == physical, no HT, so P-cores = 8 (typical for Arrow Lake)
+        if [[ $CPU_LOGICAL -eq $PHYS_CORES ]]; then
+            # No hyperthreading - Arrow Lake style
+            # P-cores are 8 on Ultra 9, E-cores are the rest
+            P_CORE_COUNT=8
+            E_CORE_COUNT=$((PHYS_CORES - 8))
+        else
+            # Hyperthreading present - Alder/Raptor Lake style
+            # P-cores have HT (2 threads each), E-cores don't
+            # Solve: P*2 + E = logical, P + E = physical
+            P_CORE_COUNT=$(( (CPU_LOGICAL - PHYS_CORES) ))
+            E_CORE_COUNT=$((PHYS_CORES - P_CORE_COUNT))
+        fi
+        # Sanity check
+        if [[ $P_CORE_COUNT -lt 4 || $P_CORE_COUNT -gt 16 ]]; then
+            P_CORE_COUNT=8  # Safe default for i9
+            E_CORE_COUNT=$((PHYS_CORES - P_CORE_COUNT))
+        fi
+        # P-cores are CPU IDs 0 through P_CORE_COUNT-1 (Intel convention)
+        P_CORES_ARR=()
+        for ((i=0; i<P_CORE_COUNT; i++)); do
+            P_CORES_ARR+=("$i")
+        done
+    fi
+fi
+
+if [[ "$IS_HYBRID" == "true" ]]; then
+    # Build comma-separated P-core list (minus 2 for system headroom)
+    MINING_COUNT=$((P_CORE_COUNT - 2))
+    if [[ $MINING_COUNT -lt 1 ]]; then MINING_COUNT=1; fi
+    MINING_P_CORES=("${P_CORES_ARR[@]:0:$MINING_COUNT}")
+    P_CORE_LIST=$(IFS=,; echo "${MINING_P_CORES[*]}")
+    ok "Hybrid CPU detected: ${P_CORE_COUNT} P-cores + ${E_CORE_COUNT} E-cores"
+    info "Mining on P-cores only (2MB L2 cache each vs shared L2 on E-cores)"
 fi
 
 # Calculate optimal threads
@@ -183,6 +222,7 @@ sudo apt-get install -y -qq \
     python3-venv python3-pip python3-dev \
     build-essential libssl-dev libffi-dev \
     lm-sensors cpufrequtils numactl \
+    libcurl4 libmicrohttpd12 \
     curl wget git jq \
     2>/dev/null || warn "Some packages may have failed to install"
 
@@ -208,12 +248,24 @@ elif [[ $TOTAL_RAM_GB -gt 16 ]]; then
 fi
 
 info "  [1/8] Huge pages (20-30% boost for YesPowerTide)..."
+# Aggressive cache drop + compact memory before allocating
 sudo sh -c "echo 3 > /proc/sys/vm/drop_caches" 2>/dev/null || true
-sudo sysctl -w vm.nr_hugepages=$HUGEPAGES_COUNT 2>/dev/null || warn "Failed to set hugepages"
+sudo sh -c "echo 1 > /proc/sys/vm/compact_memory" 2>/dev/null || true
+sleep 1
+# Try allocation in multiple rounds (fragmented memory may need retries)
+sudo sysctl -w vm.nr_hugepages=$HUGEPAGES_COUNT 2>/dev/null || true
 ACTUAL_HP=$(cat /proc/sys/vm/nr_hugepages 2>/dev/null || echo "0")
-ok "       Allocated $ACTUAL_HP/$HUGEPAGES_COUNT huge pages (${ACTUAL_HP}x2MB = $((ACTUAL_HP * 2))MB)"
+if [[ $ACTUAL_HP -lt $((HUGEPAGES_COUNT / 2)) ]]; then
+    warn "       Only got $ACTUAL_HP/$HUGEPAGES_COUNT pages (memory fragmentation)"
+    warn "       For full allocation, add to GRUB and reboot:"
+    warn "         sudo sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT=\"/GRUB_CMDLINE_LINUX_DEFAULT=\"hugepages=$HUGEPAGES_COUNT /' /etc/default/grub"
+    warn "         sudo update-grub && sudo reboot"
+    warn "       This alone can boost hashrate 20-30%!"
+else
+    ok "       Allocated $ACTUAL_HP/$HUGEPAGES_COUNT huge pages (${ACTUAL_HP}x2MB = $((ACTUAL_HP * 2))MB)"
+fi
 
-# Make persistent
+# Make persistent via sysctl (works after reboot if memory isn't fragmented)
 echo "vm.nr_hugepages = $HUGEPAGES_COUNT" | sudo tee /etc/sysctl.d/99-tidemine-hugepages.conf >/dev/null 2>&1 || true
 
 # 3b. CPU GOVERNOR — prevent frequency scaling drops
@@ -283,9 +335,14 @@ info "Step 4/8: Setting up Tidemine..."
 if [[ -d "$REPO_DIR/.git" ]]; then
     info "  Updating existing installation..."
     cd "$REPO_DIR"
-    git pull origin main 2>/dev/null || git pull 2>/dev/null || true
+    git fetch origin 2>/dev/null || true
+    # Try the feature branch first, then main
+    git checkout claude/optimized-miner-deployment-8Gu3B 2>/dev/null && \
+        git pull origin claude/optimized-miner-deployment-8Gu3B 2>/dev/null || \
+        git pull origin main 2>/dev/null || true
 else
     info "  Cloning repository..."
+    git clone -b claude/optimized-miner-deployment-8Gu3B "$REPO_URL" "$REPO_DIR" 2>/dev/null || \
     git clone "$REPO_URL" "$REPO_DIR" 2>/dev/null || {
         warn "  Git clone failed. Creating from embedded source..."
         mkdir -p "$REPO_DIR"
@@ -498,55 +555,66 @@ fi
 if [[ "$AUTO_START" == "true" && -n "$WALLET_ADDRESS" && -n "$SRBMINER_BIN" ]]; then
     info "Starting miner..."
 
-    # Build SRBMiner command — CPU-only, all optimizations
-    MINER_CMD="$SRBMINER_BIN"
-    MINER_ARGS="--algorithm yespowertide"
-    MINER_ARGS="$MINER_ARGS --pool stratum+tcp://$POOL_HOST:$POOL_PORT"
-    MINER_ARGS="$MINER_ARGS --wallet $WALLET_ADDRESS"
-    MINER_ARGS="$MINER_ARGS --password c=TDC"
-    MINER_ARGS="$MINER_ARGS --cpu-threads $OPTIMAL_THREADS"
-    MINER_ARGS="$MINER_ARGS --cpu-priority 3"
-    MINER_ARGS="$MINER_ARGS --disable-gpu"
-    MINER_ARGS="$MINER_ARGS --keepalive true"
-    MINER_ARGS="$MINER_ARGS --retry-time 5"
-    MINER_ARGS="$MINER_ARGS --api-enable --api-port 21550"
-    MINER_ARGS="$MINER_ARGS --log-file $LOG_DIR/srbminer.log"
+    # Build SRBMiner command as an array for proper argument handling
+    MINER_ARGS=(
+        "$SRBMINER_BIN"
+        --algorithm yespowertide
+        --pool "stratum+tcp://$POOL_HOST:$POOL_PORT"
+        --wallet "$WALLET_ADDRESS"
+        --password "c=TDC"
+        --cpu-threads "$OPTIMAL_THREADS"
+        --cpu-priority 3
+        --disable-gpu
+        --keepalive true
+        --retry-time 5
+        --api-enable
+        --api-port 21550
+        --log-file "$LOG_DIR/srbminer.log"
+    )
 
     # CPU affinity: P-cores only on hybrid Intel
     if [[ "$IS_HYBRID" == "true" && -n "$P_CORE_LIST" ]]; then
-        MINER_ARGS="$MINER_ARGS --cpu-affinity $P_CORE_LIST"
-        info "  CPU affinity: P-cores $P_CORE_LIST"
+        MINER_ARGS+=(--cpu-affinity "$P_CORE_LIST")
+        info "  CPU affinity: P-cores [$P_CORE_LIST]"
     fi
 
     # Failover pools
-    MINER_ARGS="$MINER_ARGS --pool stratum+tcp://tidepool.world:6243 --wallet $WALLET_ADDRESS --password c=TDC"
-    MINER_ARGS="$MINER_ARGS --pool stratum+tcp://stratum-na.rplant.xyz:7064 --wallet $WALLET_ADDRESS --password c=TDC"
+    MINER_ARGS+=(
+        --pool "stratum+tcp://tidepool.world:6243" --wallet "$WALLET_ADDRESS" --password "c=TDC"
+        --pool "stratum+tcp://stratum-na.rplant.xyz:7064" --wallet "$WALLET_ADDRESS" --password "c=TDC"
+    )
 
-    # Use numactl for NUMA-local memory allocation if available
-    LAUNCH_PREFIX=""
-    if command -v numactl &>/dev/null && [[ "$NUMA_NODES" -gt 1 ]]; then
-        LAUNCH_PREFIX="numactl --cpunodebind=0 --membind=0 --"
-        info "  NUMA: binding to node 0 for cache locality"
-    fi
+    # Show the command we're about to run
+    info "  Command: ${MINER_ARGS[0]##*/} --algorithm yespowertide --cpu-threads $OPTIMAL_THREADS --disable-gpu"
 
-    # Start via systemd if available, otherwise directly
-    if [[ "$INSTALL_SERVICE" == "true" ]]; then
-        sudo systemctl start tidemine 2>/dev/null || {
-            info "systemd start failed, starting directly..."
-            nohup $LAUNCH_PREFIX $MINER_CMD $MINER_ARGS >> "$LOG_DIR/srbminer.log" 2>&1 &
-            MINER_PID=$!
-            echo "$MINER_PID" > "$INSTALL_DIR/data/srbminer.pid"
-        }
-    else
-        nohup $LAUNCH_PREFIX $MINER_CMD $MINER_ARGS >> "$LOG_DIR/srbminer.log" 2>&1 &
-        MINER_PID=$!
-        echo "$MINER_PID" > "$INSTALL_DIR/data/srbminer.pid"
-    fi
+    # Start SRBMiner directly (bypass systemd for first run - more reliable)
+    # SRBMiner needs to run from its own directory for config files
+    SRBMINER_DIR=$(dirname "$SRBMINER_BIN")
+    cd "$SRBMINER_DIR"
 
-    sleep 3
+    # Touch log file first to ensure it exists
+    touch "$LOG_DIR/srbminer.log"
 
-    if pgrep -f "SRBMiner-MULTI" >/dev/null 2>&1; then
-        ok "Miner is running!"
+    # Launch with nohup, capturing stderr separately for debugging
+    nohup "${MINER_ARGS[@]}" >> "$LOG_DIR/srbminer.log" 2>&1 &
+    MINER_PID=$!
+    echo "$MINER_PID" > "$INSTALL_DIR/data/srbminer.pid"
+    info "  Launched PID: $MINER_PID"
+
+    # Wait and check if process survived
+    sleep 5
+
+    if kill -0 "$MINER_PID" 2>/dev/null; then
+        ok "Miner is running! (PID: $MINER_PID)"
+        echo ""
+
+        # Show first few lines of log to confirm it's mining
+        if [[ -s "$LOG_DIR/srbminer.log" ]]; then
+            echo -e "${CYAN}--- Recent log output ---${NC}"
+            tail -5 "$LOG_DIR/srbminer.log" 2>/dev/null || true
+            echo -e "${CYAN}-------------------------${NC}"
+        fi
+
         echo ""
         echo -e "${BOLD}Commands:${NC}"
         echo "  tidecoin-miner status      # Check status"
@@ -558,9 +626,32 @@ if [[ "$AUTO_START" == "true" && -n "$WALLET_ADDRESS" && -n "$SRBMINER_BIN" ]]; 
         echo ""
         echo -e "${BOLD}Metrics API:${NC} http://localhost:8420"
         echo -e "${BOLD}SRBMiner API:${NC} http://localhost:21550"
+
+        # Now also start the systemd service for future auto-restart
+        if [[ "$INSTALL_SERVICE" == "true" ]]; then
+            info "Systemd service is enabled for auto-restart on reboot."
+            info "To use it: sudo systemctl start tidemine"
+        fi
     else
-        warn "Miner may have failed to start. Check logs:"
-        echo "  tail -f $LOG_DIR/srbminer.log"
+        warn "Miner process exited (PID $MINER_PID was not running after 5s)"
+        echo ""
+        echo -e "${RED}--- Debug info ---${NC}"
+        if [[ -s "$LOG_DIR/srbminer.log" ]]; then
+            echo -e "${YELLOW}Log output:${NC}"
+            cat "$LOG_DIR/srbminer.log" 2>/dev/null
+        else
+            echo "  No log file output (SRBMiner may have crashed immediately)"
+            echo ""
+            echo "  Try running manually to see the error:"
+            echo "    cd $SRBMINER_DIR"
+            echo "    ./SRBMiner-MULTI --algorithm yespowertide --pool stratum+tcp://$POOL_HOST:$POOL_PORT --wallet $WALLET_ADDRESS --password c=TDC --cpu-threads $OPTIMAL_THREADS --disable-gpu"
+        fi
+        echo -e "${RED}------------------${NC}"
+        echo ""
+        echo "  Common fixes:"
+        echo "    1. Missing library: sudo apt install libcurl4 libmicrohttpd12"
+        echo "    2. Permission denied: chmod +x $SRBMINER_BIN"
+        echo "    3. Try without --disable-gpu if SRBMiner version doesn't support it"
     fi
 elif [[ -z "$WALLET_ADDRESS" ]]; then
     echo -e "To start mining:"
