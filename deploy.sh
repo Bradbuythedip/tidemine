@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 ###############################################################################
 # Tidemine - One-Click Tidecoin Mining Deployer
-# Optimized for Intel i9 + NVIDIA RTX 5070 Ti on Ubuntu 24.04
+# Optimized for Intel i9 CPU on Ubuntu 24.04
+#
+# YesPowerTide is CPU-ONLY (GPU support removed in SRBMiner v3.2.4).
+# The algorithm resists GPU acceleration by design via L2 cache dependency.
+# All optimizations focus on CPU cache, memory bandwidth, and scheduling.
 #
 # Usage:
 #   curl -sSL https://raw.githubusercontent.com/bradbuythedip/tidemine/main/deploy.sh | bash -s -- --wallet YOUR_TDC_ADDRESS
@@ -33,12 +37,10 @@ VENV_DIR="$INSTALL_DIR/venv"
 REPO_URL="https://github.com/bradbuythedip/tidemine.git"
 REPO_DIR="$INSTALL_DIR/tidemine"
 SRBMINER_API="https://api.github.com/repos/doktor83/SRBMiner-Multi/releases/latest"
-TIDECOIN_WALLET_URL="https://github.com/tidecoin/tidecoin/releases/download/v0.18.3/linux64.tar.gz"
 
 WALLET_ADDRESS=""
 POOL="tidecoin_official"
 BENCHMARK=false
-NO_GPU=false
 INSTALL_SERVICE=true
 AUTO_START=true
 
@@ -48,11 +50,10 @@ while [[ $# -gt 0 ]]; do
         --wallet|-w)     WALLET_ADDRESS="$2"; shift 2 ;;
         --pool|-p)       POOL="$2"; shift 2 ;;
         --benchmark|-b)  BENCHMARK=true; shift ;;
-        --no-gpu)        NO_GPU=true; shift ;;
         --no-service)    INSTALL_SERVICE=false; shift ;;
         --no-start)      AUTO_START=false; shift ;;
         --help|-h)
-            echo "Tidemine Deployer"
+            echo "Tidemine Deployer - Tidecoin CPU Mining"
             echo ""
             echo "Usage: deploy.sh [OPTIONS]"
             echo ""
@@ -60,10 +61,12 @@ while [[ $# -gt 0 ]]; do
             echo "  --wallet, -w ADDR    TDC wallet address (required)"
             echo "  --pool, -p NAME      Pool name (default: tidecoin_official)"
             echo "  --benchmark, -b      Run benchmark after install"
-            echo "  --no-gpu             Disable GPU mining"
             echo "  --no-service         Don't install systemd service"
             echo "  --no-start           Don't auto-start mining"
             echo "  --help, -h           Show this help"
+            echo ""
+            echo "Note: YesPowerTide is CPU-only. GPU mining is not supported"
+            echo "for this algorithm (removed from SRBMiner v3.2.4+)."
             exit 0
             ;;
         *) error "Unknown option: $1" ;;
@@ -81,8 +84,8 @@ cat << 'BANNER'
      ██║   ██║██████╔╝███████╗██║ ╚═╝ ██║██║██║ ╚████║███████╗
      ╚═╝   ╚═╝╚═════╝ ╚══════╝╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝╚══════╝
 
-  Tidecoin Post-Quantum CPU+GPU Miner | Falcon-512 / FN-DSA
-  Optimized for Intel i9 + NVIDIA RTX 5070 Ti
+  Tidecoin Post-Quantum CPU Miner | Falcon-512 / FN-DSA
+  YesPowerTide | Memory-hard PoW | CPU-Optimized
 
 BANNER
 echo -e "${NC}"
@@ -95,41 +98,80 @@ if [[ ! -f /etc/os-release ]]; then
     warn "Cannot detect OS. Continuing anyway..."
 fi
 
-# Check root (we need sudo for some ops)
 if [[ $EUID -eq 0 ]]; then
     warn "Running as root. Preferably run as regular user with sudo access."
 fi
 
 # Check for required tools
-for cmd in git python3 pip3 curl wget; do
+for cmd in git python3 curl wget; do
     if ! command -v "$cmd" &>/dev/null; then
         warn "$cmd not found. Installing..."
         sudo apt-get update -qq && sudo apt-get install -y -qq "$cmd" 2>/dev/null || true
     fi
 done
 
-# Check NVIDIA GPU
-if command -v nvidia-smi &>/dev/null; then
-    GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo "Unknown")
-    GPU_DRIVER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 || echo "Unknown")
-    ok "NVIDIA GPU detected: $GPU_NAME (driver: $GPU_DRIVER)"
-else
-    warn "nvidia-smi not found. GPU mining will be unavailable."
-    if [[ "$NO_GPU" == "false" ]]; then
-        warn "Consider installing NVIDIA drivers or use --no-gpu"
+# ─── CPU Detection ──────────────────────────────────────────────────────────
+CPU_MODEL=$(grep -m1 "model name" /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs || echo "Unknown")
+CPU_LOGICAL=$(nproc --all 2>/dev/null || echo "4")
+ok "CPU: $CPU_MODEL ($CPU_LOGICAL logical threads)"
+
+# Detect physical core count (unique core IDs)
+PHYS_CORES=$(lscpu -p=Core,Socket 2>/dev/null | grep -v '^#' | sort -u | wc -l)
+if [[ $PHYS_CORES -lt 1 ]]; then
+    PHYS_CORES=$((CPU_LOGICAL / 2))
+fi
+ok "Physical cores: $PHYS_CORES"
+
+# Detect hybrid architecture (Intel 12th+ gen P-cores and E-cores)
+IS_HYBRID=false
+P_CORE_COUNT=0
+E_CORE_COUNT=0
+P_CORE_LIST=""
+
+# Check for core_type sysfs (Intel Thread Director)
+if [[ -f /sys/devices/system/cpu/cpu0/topology/core_type ]]; then
+    P_CORES_ARR=()
+    E_CORES_ARR=()
+    for cpu_dir in /sys/devices/system/cpu/cpu[0-9]*/topology/core_type; do
+        cpu_id=$(echo "$cpu_dir" | grep -o 'cpu[0-9]*' | grep -o '[0-9]*')
+        core_type=$(cat "$cpu_dir" 2>/dev/null || echo "")
+        if [[ "$core_type" == "0" ]]; then
+            P_CORES_ARR+=("$cpu_id")
+        else
+            E_CORES_ARR+=("$cpu_id")
+        fi
+    done
+    P_CORE_COUNT=${#P_CORES_ARR[@]}
+    E_CORE_COUNT=${#E_CORES_ARR[@]}
+    if [[ $P_CORE_COUNT -gt 0 && $E_CORE_COUNT -gt 0 ]]; then
+        IS_HYBRID=true
+        # Build comma-separated P-core list (minus last 2 for system)
+        MINING_P_CORES=("${P_CORES_ARR[@]:0:$((P_CORE_COUNT - 2))}")
+        P_CORE_LIST=$(IFS=,; echo "${MINING_P_CORES[*]}")
+        ok "Hybrid CPU: ${P_CORE_COUNT} P-cores, ${E_CORE_COUNT} E-cores"
+        info "Mining will use P-cores only (better L2 cache per thread)"
     fi
 fi
 
-# Check CPU
-CPU_MODEL=$(grep -m1 "model name" /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs || echo "Unknown")
-CPU_CORES=$(nproc --all 2>/dev/null || echo "?")
-CPU_PHYS=$(grep -c "^processor" /proc/cpuinfo 2>/dev/null || echo "?")
-ok "CPU: $CPU_MODEL ($CPU_CORES threads)"
+# Calculate optimal threads
+if [[ "$IS_HYBRID" == "true" ]]; then
+    OPTIMAL_THREADS=$((P_CORE_COUNT - 2))
+else
+    OPTIMAL_THREADS=$((PHYS_CORES - 2))
+fi
+if [[ $OPTIMAL_THREADS -lt 1 ]]; then OPTIMAL_THREADS=1; fi
+ok "Mining threads: $OPTIMAL_THREADS"
 
 # Check RAM
 TOTAL_RAM_KB=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}' || echo "0")
 TOTAL_RAM_GB=$((TOTAL_RAM_KB / 1024 / 1024))
 ok "RAM: ${TOTAL_RAM_GB}GB"
+
+# Detect NUMA topology
+NUMA_NODES=$(lscpu 2>/dev/null | grep "NUMA node(s)" | awk '{print $NF}' || echo "1")
+if [[ "$NUMA_NODES" -gt 1 ]]; then
+    ok "NUMA: $NUMA_NODES nodes detected. Will bind to node 0 for cache locality."
+fi
 
 echo ""
 
@@ -140,7 +182,7 @@ sudo apt-get update -qq 2>/dev/null || true
 sudo apt-get install -y -qq \
     python3-venv python3-pip python3-dev \
     build-essential libssl-dev libffi-dev \
-    lm-sensors cpufrequtils \
+    lm-sensors cpufrequtils numactl \
     curl wget git jq \
     2>/dev/null || warn "Some packages may have failed to install"
 
@@ -154,9 +196,10 @@ mkdir -p "$INSTALL_DIR" "$BIN_DIR" "$LOG_DIR" "$INSTALL_DIR/data"
 ok "Directories created at $INSTALL_DIR"
 
 # ─── Step 3: System Optimizations ─────────────────────────────────────────────
-info "Step 3/8: Applying system optimizations..."
+info "Step 3/8: Applying system optimizations for YesPowerTide..."
+echo ""
 
-# 3a. Huge Pages (20-30% boost for YesPowerTide)
+# 3a. HUGE PAGES — #1 optimization (20-30% hashrate boost)
 HUGEPAGES_COUNT=1280
 if [[ $TOTAL_RAM_GB -gt 32 ]]; then
     HUGEPAGES_COUNT=2560
@@ -164,57 +207,73 @@ elif [[ $TOTAL_RAM_GB -gt 16 ]]; then
     HUGEPAGES_COUNT=1536
 fi
 
-info "  Setting up $HUGEPAGES_COUNT huge pages..."
-# Drop caches first for better allocation
+info "  [1/8] Huge pages (20-30% boost for YesPowerTide)..."
 sudo sh -c "echo 3 > /proc/sys/vm/drop_caches" 2>/dev/null || true
 sudo sysctl -w vm.nr_hugepages=$HUGEPAGES_COUNT 2>/dev/null || warn "Failed to set hugepages"
 ACTUAL_HP=$(cat /proc/sys/vm/nr_hugepages 2>/dev/null || echo "0")
-ok "  Huge pages: $ACTUAL_HP allocated (requested: $HUGEPAGES_COUNT)"
+ok "       Allocated $ACTUAL_HP/$HUGEPAGES_COUNT huge pages (${ACTUAL_HP}x2MB = $((ACTUAL_HP * 2))MB)"
 
 # Make persistent
 echo "vm.nr_hugepages = $HUGEPAGES_COUNT" | sudo tee /etc/sysctl.d/99-tidemine-hugepages.conf >/dev/null 2>&1 || true
 
-# 3b. CPU Governor → performance
-info "  Setting CPU governor to performance..."
-for cpu_dir in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
-    echo "performance" | sudo tee "$cpu_dir" >/dev/null 2>&1 || true
+# 3b. CPU GOVERNOR — prevent frequency scaling drops
+info "  [2/8] CPU governor -> performance..."
+for cpu_gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+    echo "performance" | sudo tee "$cpu_gov" >/dev/null 2>&1 || true
 done
-# Also try cpupower
 sudo cpupower frequency-set -g performance 2>/dev/null || true
-ok "  CPU governor: performance"
+ok "       All cores set to performance governor"
 
-# 3c. Disable C-states for consistent performance
+# 3c. DISABLE DEEP C-STATES — prevents hashrate drops from core wakeup latency
+info "  [3/8] Disabling deep C-states..."
 sudo sh -c "echo 1 > /sys/module/intel_idle/parameters/max_cstate" 2>/dev/null || true
+# Disable C-states > C1 individually
+for state_dir in /sys/devices/system/cpu/cpu*/cpuidle/state[2-9]*; do
+    echo 1 | sudo tee "$state_dir/disable" >/dev/null 2>&1 || true
+done
+ok "       Deep C-states disabled (C1 only)"
 
-# 3d. Kernel tuning
-info "  Applying kernel optimizations..."
+# 3d. KERNEL PARAMETERS — reduce scheduling jitter
+info "  [4/8] Kernel parameter tuning..."
 sudo sysctl -w vm.swappiness=1 2>/dev/null || true
 sudo sysctl -w vm.dirty_ratio=10 2>/dev/null || true
 sudo sysctl -w vm.dirty_background_ratio=5 2>/dev/null || true
 sudo sysctl -w kernel.sched_migration_cost_ns=5000000 2>/dev/null || true
 sudo sysctl -w kernel.sched_autogroup_enabled=0 2>/dev/null || true
-ok "  Kernel parameters optimized"
+sudo sysctl -w kernel.numa_balancing=0 2>/dev/null || true
+ok "       vm.swappiness=1, sched_migration_cost=5ms, NUMA balancing off"
 
-# 3e. Disable Transparent Huge Pages (explicit hugepages are better)
+# 3e. DISABLE TRANSPARENT HUGE PAGES — explicit hugepages are faster
+info "  [5/8] Disabling THP (explicit hugepages preferred)..."
 sudo sh -c "echo never > /sys/kernel/mm/transparent_hugepage/enabled" 2>/dev/null || true
 sudo sh -c "echo never > /sys/kernel/mm/transparent_hugepage/defrag" 2>/dev/null || true
-ok "  THP disabled (explicit hugepages preferred)"
+ok "       THP disabled"
 
-# 3f. GPU optimization
-if command -v nvidia-smi &>/dev/null; then
-    info "  Configuring GPU for maximum mining performance..."
-    sudo nvidia-smi -pm 1 2>/dev/null || true                    # Persistence mode
-    sudo nvidia-smi -pl 270 2>/dev/null || true                  # Power limit (90% of 300W TDP)
-    # Set compute mode - don't use EXCLUSIVE_PROCESS as it may block monitoring
-    sudo nvidia-smi -c DEFAULT 2>/dev/null || true
-    ok "  GPU: persistence mode, power limit 270W"
-fi
-
-# 3g. IRQ affinity - pin IRQs to last 2 cores
-TOTAL_CORES=$(nproc 2>/dev/null || echo 16)
-IRQ_MASK=$(printf "0x%x" $(( (1 << TOTAL_CORES) - (1 << (TOTAL_CORES - 2)) )) )
+# 3f. IRQ AFFINITY — pin IRQs away from mining cores
+info "  [6/8] IRQ affinity (pin to last 2 cores)..."
+IRQ_MASK=$(printf "0x%x" $(( (1 << CPU_LOGICAL) - (1 << (CPU_LOGICAL - 2)) )) 2>/dev/null || echo "0xC0")
 echo "$IRQ_MASK" | sudo tee /proc/irq/default_smp_affinity >/dev/null 2>&1 || true
-ok "  IRQ affinity optimized"
+ok "       IRQ mask: $IRQ_MASK (cores $((CPU_LOGICAL-2))-$((CPU_LOGICAL-1)))"
+
+# 3g. MEMORY LOCK LIMITS — required for huge page allocation
+info "  [7/8] Setting memory lock limits..."
+USER_NAME=$(whoami)
+echo -e "# Tidemine mining\n$USER_NAME soft memlock unlimited\n$USER_NAME hard memlock unlimited" | \
+    sudo tee /etc/security/limits.d/99-tidemine.conf >/dev/null 2>&1 || true
+ok "       memlock=unlimited for $USER_NAME"
+
+# 3h. Persist sysctl optimizations
+info "  [8/8] Persisting kernel optimizations..."
+cat << SYSCTL_EOF | sudo tee /etc/sysctl.d/99-tidemine-kernel.conf >/dev/null 2>&1
+# Tidemine CPU mining optimizations
+vm.swappiness = 1
+vm.dirty_ratio = 10
+vm.dirty_background_ratio = 5
+kernel.sched_migration_cost_ns = 5000000
+kernel.sched_autogroup_enabled = 0
+kernel.numa_balancing = 0
+SYSCTL_EOF
+ok "       Kernel params persisted to /etc/sysctl.d/"
 
 echo ""
 
@@ -228,7 +287,6 @@ if [[ -d "$REPO_DIR/.git" ]]; then
 else
     info "  Cloning repository..."
     git clone "$REPO_URL" "$REPO_DIR" 2>/dev/null || {
-        # If clone fails (private repo etc), create from embedded code
         warn "  Git clone failed. Creating from embedded source..."
         mkdir -p "$REPO_DIR"
     }
@@ -247,11 +305,10 @@ pip install --upgrade pip setuptools wheel -q 2>/dev/null || true
 # Install tidemine package
 if [[ -f "$REPO_DIR/pyproject.toml" ]]; then
     pip install -e "$REPO_DIR" -q 2>/dev/null || {
-        # Install dependencies manually if editable install fails
-        pip install typer rich pyyaml httpx psutil pynvml aiohttp -q 2>/dev/null || true
+        pip install typer rich pyyaml httpx psutil aiohttp -q 2>/dev/null || true
     }
 else
-    pip install typer rich pyyaml httpx psutil pynvml aiohttp -q 2>/dev/null || true
+    pip install typer rich pyyaml httpx psutil aiohttp -q 2>/dev/null || true
 fi
 
 # Create wrapper script in /usr/local/bin
@@ -268,7 +325,6 @@ ok "Python environment ready"
 # ─── Step 6: Download SRBMiner-MULTI ──────────────────────────────────────────
 info "Step 6/8: Installing SRBMiner-MULTI..."
 
-# Check if already installed
 SRBMINER_BIN=$(find "$BIN_DIR" -name "SRBMiner-MULTI" -type f 2>/dev/null | head -1)
 
 if [[ -z "$SRBMINER_BIN" ]]; then
@@ -277,11 +333,9 @@ if [[ -z "$SRBMINER_BIN" ]]; then
     RELEASE_TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name' 2>/dev/null || echo "unknown")
     info "  Latest version: $RELEASE_TAG"
 
-    # Find linux asset
     DOWNLOAD_URL=$(echo "$RELEASE_JSON" | jq -r '.assets[] | select(.name | test("linux.*tar")) | .browser_download_url' 2>/dev/null | head -1)
 
     if [[ -z "$DOWNLOAD_URL" || "$DOWNLOAD_URL" == "null" ]]; then
-        # Try alternate pattern
         DOWNLOAD_URL=$(echo "$RELEASE_JSON" | jq -r '.assets[] | select(.name | test("Linux|linux")) | .browser_download_url' 2>/dev/null | head -1)
     fi
 
@@ -322,15 +376,6 @@ POOL_HOSTS[zergpool]="yespowertide.mine.zergpool.com";  POOL_PORTS[zergpool]=624
 POOL_HOST="${POOL_HOSTS[$POOL]:-pool.tidecoin.exchange}"
 POOL_PORT="${POOL_PORTS[$POOL]:-3032}"
 
-# Calculate optimal threads (physical cores - 2)
-PHYS_CORES=$(lscpu -p=Core,Socket 2>/dev/null | grep -v '^#' | sort -u | wc -l)
-if [[ $PHYS_CORES -lt 2 ]]; then
-    PHYS_CORES=$(nproc 2>/dev/null || echo 4)
-fi
-OPTIMAL_THREADS=$((PHYS_CORES - 2))
-if [[ $OPTIMAL_THREADS -lt 1 ]]; then OPTIMAL_THREADS=1; fi
-
-# Write YAML config
 cat > "$INSTALL_DIR/config.yaml" << CONFIG_EOF
 wallet:
   address: "${WALLET_ADDRESS}"
@@ -340,10 +385,11 @@ mining:
   algorithm: yespowertide
   miner: srbminer
   cpu_threads: ${OPTIMAL_THREADS}
-  gpu_enabled: $([ "$NO_GPU" = "true" ] && echo "false" || echo "true")
-  gpu_id: 0
+  gpu_enabled: false  # YesPowerTide is CPU-only (GPU removed in SRBMiner v3.2.4)
   huge_pages: true
   cpu_governor: performance
+  cpu_affinity: auto  # P-cores only on hybrid Intel
+  numa_bind: true     # Bind to NUMA node 0
 
 pool:
   primary: ${POOL}
@@ -362,7 +408,6 @@ monitor:
 
 alerts:
   hashrate_drop_threshold: 0.5
-  gpu_temp_max: 85
   cpu_temp_max: 95
   notify_on_block_found: true
 
@@ -381,9 +426,9 @@ if [[ "$INSTALL_SERVICE" == "true" ]]; then
 
     sudo tee /etc/systemd/system/tidemine.service >/dev/null << SERVICE_EOF
 [Unit]
-Description=Tidemine - Tidecoin Post-Quantum CPU+GPU Miner
+Description=Tidemine - Tidecoin Post-Quantum CPU Miner (YesPowerTide)
 Documentation=https://github.com/bradbuythedip/tidemine
-After=network-online.target nvidia-persistenced.service
+After=network-online.target
 Wants=network-online.target
 
 [Service]
@@ -397,19 +442,18 @@ Restart=always
 RestartSec=30
 TimeoutStopSec=60
 
-# Performance
+# CPU performance
 Nice=-10
 IOSchedulingClass=realtime
 IOSchedulingPriority=0
 CPUSchedulingPolicy=batch
 
-# Limits
+# Required for huge pages
 LimitNOFILE=65536
 LimitMEMLOCK=infinity
 
 # Environment
 Environment=HOME=$HOME
-Environment=CUDA_VISIBLE_DEVICES=0
 Environment=PATH=$VENV_DIR/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 [Install]
@@ -421,7 +465,7 @@ SERVICE_EOF
     ok "Systemd service installed and enabled"
 fi
 
-# ─── Start Mining ─────────────────────────────────────────────────────────────
+# ─── Summary & Start ─────────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}${GREEN}============================================${NC}"
 echo -e "${BOLD}${GREEN}  Tidemine Installation Complete!${NC}"
@@ -434,17 +478,19 @@ echo -e "  ${CYAN}CLI:${NC}       tidecoin-miner --help"
 echo ""
 echo -e "  ${CYAN}CPU:${NC}       $CPU_MODEL"
 echo -e "  ${CYAN}Threads:${NC}   $OPTIMAL_THREADS (of $PHYS_CORES physical cores)"
-echo -e "  ${CYAN}Hugepages:${NC} $ACTUAL_HP allocated"
-if command -v nvidia-smi &>/dev/null; then
-echo -e "  ${CYAN}GPU:${NC}       $GPU_NAME"
+if [[ "$IS_HYBRID" == "true" ]]; then
+echo -e "  ${CYAN}Hybrid:${NC}    ${P_CORE_COUNT} P-cores (mining), ${E_CORE_COUNT} E-cores (idle)"
 fi
+echo -e "  ${CYAN}Hugepages:${NC} $ACTUAL_HP allocated (${ACTUAL_HP}x2MB)"
+echo -e "  ${CYAN}NUMA:${NC}      $NUMA_NODES node(s)"
 echo -e "  ${CYAN}Pool:${NC}      $POOL ($POOL_HOST:$POOL_PORT)"
 echo -e "  ${CYAN}Wallet:${NC}    ${WALLET_ADDRESS:-NOT SET}"
+echo -e "  ${CYAN}Mode:${NC}      CPU-only (YesPowerTide is GPU-resistant by design)"
 echo ""
 
 if [[ -z "$WALLET_ADDRESS" ]]; then
     echo -e "${YELLOW}WARNING: No wallet address set!${NC}"
-    echo -e "Set it with: ${BOLD}tidecoin-miner config${NC}"
+    echo -e "Set it with: ${BOLD}tidecoin-miner start --wallet YOUR_TDC_ADDRESS${NC}"
     echo -e "Or edit: $INSTALL_DIR/config.yaml"
     echo ""
 fi
@@ -452,7 +498,7 @@ fi
 if [[ "$AUTO_START" == "true" && -n "$WALLET_ADDRESS" && -n "$SRBMINER_BIN" ]]; then
     info "Starting miner..."
 
-    # Build SRBMiner command
+    # Build SRBMiner command — CPU-only, all optimizations
     MINER_CMD="$SRBMINER_BIN"
     MINER_ARGS="--algorithm yespowertide"
     MINER_ARGS="$MINER_ARGS --pool stratum+tcp://$POOL_HOST:$POOL_PORT"
@@ -460,39 +506,45 @@ if [[ "$AUTO_START" == "true" && -n "$WALLET_ADDRESS" && -n "$SRBMINER_BIN" ]]; 
     MINER_ARGS="$MINER_ARGS --password c=TDC"
     MINER_ARGS="$MINER_ARGS --cpu-threads $OPTIMAL_THREADS"
     MINER_ARGS="$MINER_ARGS --cpu-priority 3"
+    MINER_ARGS="$MINER_ARGS --disable-gpu"
     MINER_ARGS="$MINER_ARGS --keepalive true"
     MINER_ARGS="$MINER_ARGS --retry-time 5"
     MINER_ARGS="$MINER_ARGS --api-enable --api-port 21550"
     MINER_ARGS="$MINER_ARGS --log-file $LOG_DIR/srbminer.log"
 
-    if [[ "$NO_GPU" == "false" ]]; then
-        MINER_ARGS="$MINER_ARGS --gpu-id 0"
-    else
-        MINER_ARGS="$MINER_ARGS --disable-gpu"
+    # CPU affinity: P-cores only on hybrid Intel
+    if [[ "$IS_HYBRID" == "true" && -n "$P_CORE_LIST" ]]; then
+        MINER_ARGS="$MINER_ARGS --cpu-affinity $P_CORE_LIST"
+        info "  CPU affinity: P-cores $P_CORE_LIST"
     fi
 
-    # Add failover pools
+    # Failover pools
     MINER_ARGS="$MINER_ARGS --pool stratum+tcp://tidepool.world:6243 --wallet $WALLET_ADDRESS --password c=TDC"
     MINER_ARGS="$MINER_ARGS --pool stratum+tcp://stratum-na.rplant.xyz:7064 --wallet $WALLET_ADDRESS --password c=TDC"
+
+    # Use numactl for NUMA-local memory allocation if available
+    LAUNCH_PREFIX=""
+    if command -v numactl &>/dev/null && [[ "$NUMA_NODES" -gt 1 ]]; then
+        LAUNCH_PREFIX="numactl --cpunodebind=0 --membind=0 --"
+        info "  NUMA: binding to node 0 for cache locality"
+    fi
 
     # Start via systemd if available, otherwise directly
     if [[ "$INSTALL_SERVICE" == "true" ]]; then
         sudo systemctl start tidemine 2>/dev/null || {
-            # Direct start as fallback
-            info "Starting miner directly..."
-            nohup $MINER_CMD $MINER_ARGS >> "$LOG_DIR/srbminer.log" 2>&1 &
+            info "systemd start failed, starting directly..."
+            nohup $LAUNCH_PREFIX $MINER_CMD $MINER_ARGS >> "$LOG_DIR/srbminer.log" 2>&1 &
             MINER_PID=$!
             echo "$MINER_PID" > "$INSTALL_DIR/data/srbminer.pid"
         }
     else
-        nohup $MINER_CMD $MINER_ARGS >> "$LOG_DIR/srbminer.log" 2>&1 &
+        nohup $LAUNCH_PREFIX $MINER_CMD $MINER_ARGS >> "$LOG_DIR/srbminer.log" 2>&1 &
         MINER_PID=$!
         echo "$MINER_PID" > "$INSTALL_DIR/data/srbminer.pid"
     fi
 
     sleep 3
 
-    # Verify miner is running
     if pgrep -f "SRBMiner-MULTI" >/dev/null 2>&1; then
         ok "Miner is running!"
         echo ""
@@ -500,6 +552,8 @@ if [[ "$AUTO_START" == "true" && -n "$WALLET_ADDRESS" && -n "$SRBMINER_BIN" ]]; 
         echo "  tidecoin-miner status      # Check status"
         echo "  tidecoin-miner dashboard   # Live monitoring"
         echo "  tidecoin-miner stop        # Stop mining"
+        echo "  tidecoin-miner benchmark   # Auto-tune threads"
+        echo "  tidecoin-miner pools       # Test pool latency"
         echo "  tail -f $LOG_DIR/srbminer.log  # View logs"
         echo ""
         echo -e "${BOLD}Metrics API:${NC} http://localhost:8420"
@@ -517,5 +571,17 @@ else
     echo -e "  ${BOLD}sudo systemctl start tidemine${NC}"
 fi
 
+echo ""
+echo -e "${BOLD}Optimizations applied:${NC}"
+echo "  [1] Huge pages: ${ACTUAL_HP}x2MB (20-30% boost)"
+echo "  [2] CPU governor: performance"
+echo "  [3] C-states: limited to C1"
+echo "  [4] Kernel: swappiness=1, sched tuning, NUMA balancing off"
+echo "  [5] THP: disabled (explicit hugepages)"
+echo "  [6] IRQ affinity: last 2 cores"
+echo "  [7] memlock: unlimited"
+if [[ "$IS_HYBRID" == "true" ]]; then
+echo "  [8] Hybrid CPU: P-cores only (E-cores idle)"
+fi
 echo ""
 echo -e "${CYAN}Happy mining! Falcon-512 post-quantum security.${NC}"

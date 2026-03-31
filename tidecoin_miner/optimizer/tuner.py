@@ -1,4 +1,15 @@
-"""CPU and GPU performance tuning for maximum hashrate."""
+"""CPU performance tuning for maximum YesPowerTide hashrate.
+
+YesPowerTide is CPU-only (GPU support removed in SRBMiner v3.2.4).
+The algorithm is memory-bandwidth bound - performance scales with:
+1. L2/L3 cache size and speed
+2. Memory bandwidth (dual/quad channel)
+3. Core count (physical cores, NOT hyperthreads)
+4. Memory latency (NUMA-local access critical)
+
+AVX-512/AVX2 provide NO benefit for the yespower kernel itself.
+The algorithm deliberately uses SSE2-level operations.
+"""
 
 import os
 import subprocess
@@ -15,6 +26,7 @@ def get_cpu_info() -> dict:
         "cores_physical": psutil.cpu_count(logical=False),
         "cores_logical": psutil.cpu_count(logical=True),
         "freq_mhz": 0,
+        "cache_l2_kb": 0,
         "cache_l3_kb": 0,
         "avx512": False,
         "avx2": False,
@@ -22,6 +34,9 @@ def get_cpu_info() -> dict:
         "is_intel": False,
         "is_amd": False,
         "numa_nodes": 1,
+        "is_hybrid": False,
+        "p_cores": 0,
+        "e_cores": 0,
     }
 
     try:
@@ -40,13 +55,19 @@ def get_cpu_info() -> dict:
     except FileNotFoundError:
         pass
 
-    # Get L3 cache size
+    # Get cache sizes and NUMA info from lscpu
     try:
         result = subprocess.run(
             ["lscpu"], capture_output=True, text=True, timeout=5
         )
         for line in result.stdout.splitlines():
-            if "L3 cache" in line:
+            if "L2 cache" in line:
+                val = line.split(":")[-1].strip()
+                if "MiB" in val:
+                    info["cache_l2_kb"] = int(float(val.replace("MiB", "").strip()) * 1024)
+                elif "KiB" in val:
+                    info["cache_l2_kb"] = int(val.replace("KiB", "").strip())
+            elif "L3 cache" in line:
                 val = line.split(":")[-1].strip()
                 if "MiB" in val:
                     info["cache_l3_kb"] = int(float(val.replace("MiB", "").strip()) * 1024)
@@ -55,6 +76,26 @@ def get_cpu_info() -> dict:
             elif "NUMA node(s)" in line:
                 info["numa_nodes"] = int(line.split(":")[-1].strip())
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        pass
+
+    # Detect hybrid architecture (Intel 12th+ gen with P-cores and E-cores)
+    try:
+        cpus = sorted(Path("/sys/devices/system/cpu/").glob("cpu[0-9]*"))
+        p_count = 0
+        e_count = 0
+        for cpu_dir in cpus:
+            core_type_path = cpu_dir / "topology" / "core_type"
+            if core_type_path.exists():
+                core_type = core_type_path.read_text().strip()
+                if core_type == "0":
+                    p_count += 1
+                else:
+                    e_count += 1
+        if p_count > 0 and e_count > 0:
+            info["is_hybrid"] = True
+            info["p_cores"] = p_count
+            info["e_cores"] = e_count
+    except (ValueError, OSError):
         pass
 
     freq = psutil.cpu_freq()
@@ -77,9 +118,8 @@ def set_cpu_governor(governor: str = "performance") -> bool:
             )
         print(f"[OK] CPU governor set to '{governor}' on {cores} cores")
         return True
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-        print(f"[!] Failed to set CPU governor: {e}")
-        # Try cpupower
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        # Try cpupower fallback
         try:
             subprocess.run(
                 ["sudo", "cpupower", "frequency-set", "-g", governor],
@@ -88,20 +128,54 @@ def set_cpu_governor(governor: str = "performance") -> bool:
             print(f"[OK] CPU governor set via cpupower")
             return True
         except (subprocess.CalledProcessError, FileNotFoundError):
+            print(f"[!] Failed to set CPU governor to {governor}")
             return False
 
 
 def disable_cpu_cstates() -> bool:
-    """Disable deep C-states for consistent mining performance."""
+    """Disable deep C-states for consistent mining performance.
+
+    Deep sleep states cause hashrate drops when cores wake up.
+    Limiting to C1 keeps cores responsive.
+    """
+    success = True
     try:
-        # Set max_cstate=1 via /dev/cpu_dma_latency
-        # This prevents deep sleep states that cause hashrate drops
+        # Limit max C-state for Intel idle driver
         subprocess.run(
             ["sudo", "sh", "-c",
              "echo 1 > /sys/module/intel_idle/parameters/max_cstate 2>/dev/null || true"],
             check=False, capture_output=True, timeout=5,
         )
-        print("[OK] CPU C-states limited for consistent performance")
+    except subprocess.TimeoutExpired:
+        success = False
+
+    # Disable individual C-states > C1 via sysfs
+    try:
+        for cpu_dir in Path("/sys/devices/system/cpu/").glob("cpu[0-9]*/cpuidle"):
+            for state_dir in sorted(cpu_dir.glob("state[2-9]*")):
+                disable_path = state_dir / "disable"
+                if disable_path.exists():
+                    subprocess.run(
+                        ["sudo", "tee", str(disable_path)],
+                        input=b"1",
+                        capture_output=True, timeout=2,
+                    )
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+    if success:
+        print("[OK] Deep C-states disabled for consistent performance")
+    return success
+
+
+def disable_numa_balancing() -> bool:
+    """Disable automatic NUMA balancing to prevent page migration overhead."""
+    try:
+        subprocess.run(
+            ["sudo", "sysctl", "-w", "kernel.numa_balancing=0"],
+            check=True, capture_output=True, timeout=5,
+        )
+        print("[OK] NUMA auto-balancing disabled")
         return True
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return False
@@ -110,11 +184,12 @@ def disable_cpu_cstates() -> bool:
 def set_kernel_params() -> bool:
     """Set kernel parameters for mining optimization."""
     params = {
-        "vm.swappiness": "1",           # Minimize swapping
-        "vm.dirty_ratio": "10",          # Reduce dirty page ratio
+        "vm.swappiness": "1",                          # Minimize swapping
+        "vm.dirty_ratio": "10",                         # Reduce dirty page ratio
         "vm.dirty_background_ratio": "5",
-        "kernel.sched_migration_cost_ns": "5000000",  # Reduce thread migration
-        "kernel.sched_autogroup_enabled": "0",         # Disable autogroup for mining
+        "kernel.sched_migration_cost_ns": "5000000",    # Reduce thread migration
+        "kernel.sched_autogroup_enabled": "0",           # Disable autogroup for mining
+        "kernel.numa_balancing": "0",                    # Disable NUMA auto-balance
     }
     success = True
     for key, val in params.items():
@@ -130,57 +205,12 @@ def set_kernel_params() -> bool:
     return success
 
 
-def set_gpu_performance_mode() -> bool:
-    """Set NVIDIA GPU to maximum performance mode."""
-    cmds = [
-        # Enable persistence mode (keeps driver loaded)
-        ["sudo", "nvidia-smi", "-pm", "1"],
-        # Set compute mode to exclusive (mining only)
-        ["sudo", "nvidia-smi", "-c", "EXCLUSIVE_PROCESS"],
-        # Set power limit to 90% TDP for optimal efficiency
-        # RTX 5070 Ti TDP is ~300W, start at 270W
-        ["sudo", "nvidia-smi", "-pl", "270"],
-        # Lock GPU clocks to max boost
-        ["sudo", "nvidia-smi", "-lgc", "0,3000"],
-        # Set memory clock to max
-        ["sudo", "nvidia-smi", "-lmc", "0,10000"],
-    ]
-
-    success = True
-    for cmd in cmds:
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-            if result.returncode != 0:
-                # Non-fatal, some settings may not be supported
-                pass
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
-            success = False
-
-    print("[OK] GPU performance mode configured")
-    return success
-
-
-def set_gpu_fan_curve() -> bool:
-    """Set aggressive GPU fan curve for thermal headroom."""
-    try:
-        # Enable manual fan control
-        subprocess.run(
-            ["nvidia-settings", "-a", "GPUFanControlState=1"],
-            capture_output=True, timeout=5,
-        )
-        # Set fan to 80% for mining
-        subprocess.run(
-            ["nvidia-settings", "-a", "GPUTargetFanSpeed=80"],
-            capture_output=True, timeout=5,
-        )
-        print("[OK] GPU fan set to 80%")
-        return True
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
-
-
 def optimize_irq_affinity() -> bool:
-    """Pin IRQ handlers away from mining cores."""
+    """Pin IRQ handlers away from mining cores.
+
+    Mining threads should never be interrupted by IRQ processing.
+    Pin all IRQs to the last 2 logical cores.
+    """
     try:
         cores = psutil.cpu_count(logical=True) or 4
         # Reserve last 2 cores for IRQ handling
@@ -189,14 +219,18 @@ def optimize_irq_affinity() -> bool:
             ["sudo", "sh", "-c", f"echo {irq_mask} > /proc/irq/default_smp_affinity"],
             check=True, capture_output=True, timeout=5,
         )
-        print("[OK] IRQ affinity optimized")
+        print("[OK] IRQ affinity: pinned to last 2 cores")
         return True
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return False
 
 
 def disable_transparent_hugepages() -> bool:
-    """Disable THP - explicit huge pages are better for mining."""
+    """Disable THP - explicit huge pages are better for mining.
+
+    THP causes allocation stalls and fragmentation. Explicit 2MB
+    hugepages are pre-allocated and faster.
+    """
     try:
         subprocess.run(
             ["sudo", "sh", "-c", "echo never > /sys/kernel/mm/transparent_hugepage/enabled"],
@@ -206,38 +240,72 @@ def disable_transparent_hugepages() -> bool:
             ["sudo", "sh", "-c", "echo never > /sys/kernel/mm/transparent_hugepage/defrag"],
             check=True, capture_output=True, timeout=5,
         )
-        print("[OK] Transparent huge pages disabled (explicit hugepages preferred)")
+        print("[OK] Transparent huge pages disabled")
         return True
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return False
 
 
+def set_memory_lock_limits() -> bool:
+    """Set unlimited memory locking for huge page usage."""
+    try:
+        # Add limits for current user
+        user = os.environ.get("USER", "")
+        if user:
+            limits_conf = f"# Tidemine mining\n{user} soft memlock unlimited\n{user} hard memlock unlimited\n"
+            subprocess.run(
+                ["sudo", "tee", "/etc/security/limits.d/99-tidemine.conf"],
+                input=limits_conf.encode(),
+                check=True, capture_output=True, timeout=5,
+            )
+            print("[OK] Memory lock limits set to unlimited")
+            return True
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        pass
+    return False
+
+
 def get_optimal_thread_count() -> int:
-    """Calculate optimal thread count for YesPowerTide mining."""
+    """Calculate optimal thread count for YesPowerTide mining.
+
+    YesPowerTide is memory-bound with heavy L2 cache dependency.
+    Each thread needs dedicated L2 cache access.
+
+    Rules:
+    - Use physical cores only (no hyperthreading benefit)
+    - On hybrid Intel: use P-cores only (E-cores have smaller caches)
+    - Reserve 2 cores for system/IRQ handling
+    """
     cpu = get_cpu_info()
+
+    # Hybrid Intel: P-cores only
+    if cpu["is_hybrid"] and cpu["p_cores"] > 0:
+        optimal = max(1, cpu["p_cores"] - 2)
+        return optimal
+
     physical = cpu["cores_physical"] or 4
-
-    # YesPowerTide is memory-bound: use physical cores minus headroom
-    # On i9 with HT: physical cores - 2 for system
-    # This avoids hyperthreading contention on shared L3 cache
     optimal = max(1, physical - 2)
-
-    # If large L3 cache (>20MB), can use more threads
-    if cpu["cache_l3_kb"] > 20 * 1024:
-        optimal = max(1, physical - 1)
 
     return optimal
 
 
 def apply_all_optimizations() -> dict:
-    """Apply all system optimizations for mining."""
+    """Apply all system optimizations for CPU mining.
+
+    GPU optimizations removed - YesPowerTide is CPU-only.
+    Focus is on CPU cache, memory bandwidth, and scheduling.
+    """
+    print("[*] Applying system optimizations for YesPowerTide CPU mining...")
+
     results = {
         "cpu_governor": set_cpu_governor("performance"),
         "cpu_cstates": disable_cpu_cstates(),
         "kernel_params": set_kernel_params(),
-        "gpu_performance": set_gpu_performance_mode(),
-        "gpu_fan": set_gpu_fan_curve(),
         "irq_affinity": optimize_irq_affinity(),
         "thp_disabled": disable_transparent_hugepages(),
+        "memlock_limits": set_memory_lock_limits(),
     }
+
+    applied = sum(1 for v in results.values() if v)
+    print(f"[OK] {applied}/{len(results)} optimizations applied")
     return results

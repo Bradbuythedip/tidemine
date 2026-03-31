@@ -74,21 +74,16 @@ def make_hashrate_panel(snapshot: dict, averages: dict, spark_data: list) -> Pan
     table.add_column("15min avg", width=12, justify="right")
 
     table.add_row(
-        "[yellow]CPU[/]",
-        format_hashrate(hr.get("cpu", 0)),
-        "", "", "",
-    )
-    table.add_row(
-        "[green]GPU[/]",
-        format_hashrate(hr.get("gpu", 0)),
-        "", "", "",
-    )
-    table.add_row(
-        "[bold white]TOTAL[/]",
-        f"[bold]{format_hashrate(hr.get('total', 0))}[/]",
+        "[bold yellow]CPU[/]",
+        f"[bold]{format_hashrate(hr.get('cpu', 0))}[/]",
         format_hashrate(averages.get("hashrate_1m", 0)),
         format_hashrate(averages.get("hashrate_5m", 0)),
         format_hashrate(averages.get("hashrate_15m", 0)),
+    )
+    table.add_row(
+        "[dim]Note[/]",
+        "[dim]YesPowerTide is CPU-only (GPU resistant by design)[/]",
+        "", "", "",
     )
 
     spark = sparkline(spark_data)
@@ -122,14 +117,6 @@ def make_hardware_panel(snapshot: dict) -> Panel:
     table = Table(show_header=False, expand=True, box=None)
     table.add_column("Metric", width=16)
     table.add_column("Value", justify="right")
-
-    # GPU
-    gpu_temp = gpu.get("temperature", 0)
-    temp_color = "green" if gpu_temp < 70 else "yellow" if gpu_temp < 85 else "red"
-    table.add_row("[bold]GPU[/]", "")
-    table.add_row("  Temperature", f"[{temp_color}]{gpu_temp}C[/]")
-    table.add_row("  Power", f"{gpu.get('power', 0)}W")
-    table.add_row("  Fan", f"{gpu.get('fan_speed', 0)}%")
 
     # CPU
     cpu_temps = cpu.get("temps", [])

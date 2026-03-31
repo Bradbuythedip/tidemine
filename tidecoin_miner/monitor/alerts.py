@@ -19,7 +19,6 @@ class AlertManager:
         alerts = []
 
         hr = snapshot.get("hashrate", {}).get("total", 0)
-        gpu = snapshot.get("gpu") or {}
         cpu_temps = snapshot.get("cpu", {}).get("temps", [])
 
         # Set baseline after warmup
@@ -36,17 +35,6 @@ class AlertManager:
                     f"Hashrate dropped {drop:.0%} (from {self.baseline_hashrate:.1f} to {hr:.1f} H/s)",
                     severity="warning",
                 ))
-
-        # GPU temperature
-        gpu_temp = gpu.get("temperature", 0)
-        gpu_max = self.cfg.get("gpu_temp_max", 85)
-        if gpu_temp > gpu_max:
-            alerts.append(self._make_alert(
-                "gpu_overheat",
-                f"GPU temperature {gpu_temp}C exceeds limit {gpu_max}C",
-                severity="critical",
-                action="throttle_gpu",
-            ))
 
         # CPU temperature
         if cpu_temps:
