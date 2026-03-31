@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 ###############################################################################
 # Tidemine - One-Click Tidecoin Mining Deployer
-# Optimized for Intel i9 CPU on Ubuntu 24.04
+# Optimized for Intel i9 275HX + RTX 5070 Ti on Ubuntu 24.04
 #
-# YesPowerTide is CPU-ONLY (GPU support removed in SRBMiner v3.2.4).
-# The algorithm resists GPU acceleration by design via L2 cache dependency.
-# All optimizations focus on CPU cache, memory bandwidth, and scheduling.
+# Dual CPU+GPU mining with SRBMiner 3.2.5 (GPU yespowertide confirmed
+# on NVIDIA Blackwell). CPU ~1500 H/s/thread, GPU ~3700 H/s.
 #
 # Usage:
 #   curl -sSL https://raw.githubusercontent.com/bradbuythedip/tidemine/main/deploy.sh | bash -s -- --wallet YOUR_TDC_ADDRESS
@@ -38,7 +37,7 @@ REPO_URL="https://github.com/bradbuythedip/tidemine.git"
 REPO_DIR="$INSTALL_DIR/tidemine"
 SRBMINER_API="https://api.github.com/repos/doktor83/SRBMiner-Multi/releases/latest"
 
-WALLET_ADDRESS=""
+WALLET_ADDRESS="TBVHgZx72R8HW1JaRyj7Q4g6mLFfdCDCgL"
 POOL="tidecoin_official"
 BENCHMARK=false
 INSTALL_SERVICE=true
@@ -612,13 +611,23 @@ LAUNCH_EOF
 
     # Kill any existing tidemine screen session
     screen -S tidemine -X quit 2>/dev/null || true
+
+    # Launch in screen (provides PTY that SRBMiner requires)
     screen -dmS tidemine bash "$LAUNCHER"
-    info "  Launched in screen session 'tidemine'"
+    sleep 1
 
-    # Wait and check if process survived
-    sleep 8
+    # Verify screen session exists
+    if screen -ls 2>/dev/null | grep -q tidemine; then
+        info "  Screen session 'tidemine' is running"
+    else
+        warn "  Screen session may not have started - checking anyway..."
+    fi
 
-    MINER_PID=$(pgrep -f "SRBMiner-MULTI.*yespowertide" | head -1)
+    # Wait for SRBMiner to initialize
+    info "  Waiting for miner to initialize (10s)..."
+    sleep 10
+
+    MINER_PID=$(pgrep -f "SRBMiner-MULTI.*yespowertide" 2>/dev/null | head -1 || true)
     if [[ -n "$MINER_PID" ]]; then
         echo "$MINER_PID" > "$INSTALL_DIR/data/srbminer.pid"
         ok "Miner is running! (PID: $MINER_PID)"
