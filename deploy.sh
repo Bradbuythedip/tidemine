@@ -595,36 +595,23 @@ if [[ "$AUTO_START" == "true" && -n "$WALLET_ADDRESS" && -n "$SRBMINER_BIN" ]]; 
     # Launch with screen to provide a PTY (SRBMiner requires a terminal)
     # nohup removes the TTY, causing SRBMiner to exit on warnings that are
     # non-fatal in a real terminal. screen provides a proper PTY.
+    # SRBMiner requires a real PTY to handle non-fatal warnings properly.
+    # screen -dmS does NOT provide a sufficient PTY (miner exits on warnings).
+    # The `script` command allocates a real PTY and works with nohup.
     #
-    # Write a launcher script so arguments with spaces are handled correctly
-    LAUNCHER="$INSTALL_DIR/data/launch_miner.sh"
-    cat > "$LAUNCHER" << 'LAUNCH_EOF'
-#!/usr/bin/env bash
-LAUNCH_EOF
-    echo "cd \"$SRBMINER_DIR\"" >> "$LAUNCHER"
-    echo "${MINER_ARGS[*]} 2>&1 | tee -a \"$LOG_DIR/srbminer.log\"
-# If miner exits, keep screen open for debugging
-echo 'Miner exited. Press Enter to close.'
-read" >> "$LAUNCHER"
-    chmod +x "$LAUNCHER"
-
-    # Kill any existing tidemine screen session
-    screen -S tidemine -X quit 2>/dev/null || true
-
-    # Launch in screen (provides PTY that SRBMiner requires)
-    screen -dmS tidemine bash "$LAUNCHER"
+    # Kill any existing miner process
+    pkill -f "SRBMiner-MULTI.*yespowertide" 2>/dev/null || true
     sleep 1
 
-    # Verify screen session exists
-    if screen -ls 2>/dev/null | grep -q tidemine; then
-        info "  Screen session 'tidemine' is running"
-    else
-        warn "  Screen session may not have started - checking anyway..."
-    fi
+    info "  Launching with PTY via 'script' command..."
+    cd "$SRBMINER_DIR"
+    nohup script -qfc "${MINER_ARGS[*]}" /dev/null >> "$LOG_DIR/srbminer.log" 2>&1 &
+    LAUNCHED_PID=$!
+    disown "$LAUNCHED_PID" 2>/dev/null || true
 
     # Wait for SRBMiner to initialize
-    info "  Waiting for miner to initialize (10s)..."
-    sleep 10
+    info "  Waiting for miner to initialize (15s)..."
+    sleep 15
 
     MINER_PID=$(pgrep -f "SRBMiner-MULTI.*yespowertide" 2>/dev/null | head -1 || true)
     if [[ -n "$MINER_PID" ]]; then
@@ -641,7 +628,6 @@ read" >> "$LAUNCHER"
 
         echo ""
         echo -e "${BOLD}Commands:${NC}"
-        echo "  screen -r tidemine         # Attach to miner console"
         echo "  tidecoin-miner status      # Check status"
         echo "  tidecoin-miner dashboard   # Live monitoring"
         echo "  tidecoin-miner stop        # Stop mining"
@@ -668,8 +654,8 @@ read" >> "$LAUNCHER"
             echo "  No log file output (SRBMiner may have crashed immediately)"
         fi
         echo ""
-        echo "  Screen session status:"
-        screen -ls 2>/dev/null || echo "  (no screen sessions)"
+        echo "  Process check:"
+        ps aux | grep -i srbminer | grep -v grep || echo "  (no SRBMiner processes)"
         echo -e "${RED}------------------${NC}"
         echo ""
         echo "  Try running manually:"
