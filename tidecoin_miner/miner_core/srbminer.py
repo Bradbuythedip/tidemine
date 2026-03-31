@@ -176,8 +176,9 @@ def start(cfg: Optional[dict] = None, pool_name: Optional[str] = None) -> int:
     print(f"[*] Starting SRBMiner ({threads} CPU threads + GPU)...")
 
     env = {}
+    binary_dir = str(Path(cmd[0]).parent)
 
-    proc = start_process(MINER_NAME, cmd, nice=-10, env=env)
+    proc = start_process(MINER_NAME, cmd, nice=-10, env=env, cwd=binary_dir)
     print(f"[OK] SRBMiner started (PID: {proc.pid})")
 
     # Wait briefly and verify it's running

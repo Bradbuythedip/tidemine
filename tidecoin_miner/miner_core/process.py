@@ -1,6 +1,7 @@
 """Generic process management for mining subprocesses."""
 
 import os
+import shutil
 import signal
 import subprocess
 import time
@@ -74,37 +75,80 @@ def start_process(
     cwd: Optional[str] = None,
     nice: int = -10,
 ) -> subprocess.Popen:
-    """Start a managed subprocess with priority and logging."""
+    """Start a managed subprocess with a PTY via screen.
+
+    SRBMiner requires a pseudo-terminal (PTY) to run correctly.
+    Without a TTY, it exits on non-fatal warnings. We use screen
+    to provide a proper PTY session.
+    """
     ensure_dirs()
 
     if is_running(name):
         stop_process(name)
 
     log_file = LOG_DIR / f"{name}.log"
+    screen_name = f"tidemine-{name}"
 
     full_env = os.environ.copy()
     if env:
         full_env.update(env)
 
-    with open(log_file, "a") as log:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            env=full_env,
-            cwd=cwd,
-            start_new_session=True,
-        )
+    # Write a launcher script for clean argument handling
+    launcher = DATA_DIR / f"launch_{name}.sh"
+    binary_dir = cwd or str(Path(cmd[0]).parent)
+    cmd_str = " ".join(str(c) for c in cmd)
+    launcher.write_text(
+        f"#!/usr/bin/env bash\n"
+        f"cd \"{binary_dir}\"\n"
+        f"{cmd_str} 2>&1 | tee -a \"{log_file}\"\n"
+    )
+    launcher.chmod(0o755)
 
-    # Set process priority
-    try:
-        p = psutil.Process(proc.pid)
-        p.nice(nice)
-    except (psutil.AccessDenied, psutil.NoSuchProcess):
-        pass
+    # Kill any existing screen session with this name
+    subprocess.run(
+        ["screen", "-S", screen_name, "-X", "quit"],
+        capture_output=True,
+    )
 
-    save_pid(name, proc.pid)
+    # Launch in screen
+    proc = subprocess.Popen(
+        ["screen", "-dmS", screen_name, "bash", str(launcher)],
+        env=full_env,
+        start_new_session=True,
+    )
+    proc.wait()  # screen -dm returns immediately
+
+    # Find the actual miner PID
+    time.sleep(2)
+    miner_pid = _find_process_pid(cmd[0])
+
+    if miner_pid:
+        # Set process priority
+        try:
+            p = psutil.Process(miner_pid)
+            p.nice(nice)
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            pass
+        save_pid(name, miner_pid)
+        # Return a fake Popen-like with the real PID
+        proc.pid = miner_pid
+    else:
+        save_pid(name, proc.pid)
+
     return proc
+
+
+def _find_process_pid(binary_path: str) -> Optional[int]:
+    """Find PID of a running process by binary path."""
+    binary_name = Path(binary_path).name
+    for p in psutil.process_iter(["pid", "name", "cmdline"]):
+        try:
+            cmdline = p.info.get("cmdline") or []
+            if any(binary_name in str(c) for c in cmdline):
+                return p.info["pid"]
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    return None
 
 
 def get_process_info(name: str) -> Optional[dict]:
