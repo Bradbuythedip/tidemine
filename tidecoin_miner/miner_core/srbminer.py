@@ -138,8 +138,8 @@ def build_command(cfg: dict, pool_name: Optional[str] = None) -> list[str]:
         "--wallet", wallet,
         "--password", "c=TDC",
         "--cpu-threads", str(threads),
-        # yespowertide is CPU-only in SRBMiner v3.2.4+
-        "--disable-gpu",
+        # yespowertide is already CPU-only [C---] in v3.2.4+
+        # Do NOT pass --disable-gpu (causes crash on some versions)
         # API for monitoring
         "--api-enable",
         "--api-port", str(API_PORT),
@@ -147,16 +147,11 @@ def build_command(cfg: dict, pool_name: Optional[str] = None) -> list[str]:
         "--log-file", str(LOG_DIR / "srbminer.log"),
         # CPU priority (3 = above normal)
         "--cpu-priority", "3",
-        # Keepalive for pool connection stability
-        "--keepalive", "true",
+        # Keepalive for pool connection stability (flag only, no value)
+        "--keepalive",
         # Fast reconnect on disconnect
         "--retry-time", "5",
     ]
-
-    # CPU affinity: bind to specific cores (P-cores or NUMA node)
-    if mining_cpus:
-        cpu_str = ",".join(str(c) for c in mining_cpus)
-        cmd.extend(["--cpu-affinity", cpu_str])
 
     # Add failover pools
     failover_pools = cfg["pool"].get("failover_order", [])
@@ -177,16 +172,18 @@ def start(cfg: Optional[dict] = None, pool_name: Optional[str] = None) -> int:
     cmd = build_command(cfg, pool_name)
 
     mining_cpus, threads = get_mining_cpus(cfg)
-    if mining_cpus:
-        print(f"[*] CPU affinity: cores {mining_cpus[:5]}{'...' if len(mining_cpus) > 5 else ''}")
+
+    # Use taskset for CPU affinity (P-cores only on hybrid Intel)
+    # SRBMiner's --cpu-affinity takes hex bitmask which is error-prone;
+    # taskset -c with comma-separated IDs is simpler and more reliable
+    if mining_cpus and shutil.which("taskset"):
+        cpu_str = ",".join(str(c) for c in mining_cpus)
+        cmd = ["taskset", "-c", cpu_str] + cmd
+        print(f"[*] CPU affinity via taskset: cores [{cpu_str}]")
+
     print(f"[*] Starting SRBMiner ({threads} threads, CPU-only)...")
 
-    # Use taskset for NUMA-aware launching if numactl available
     env = {}
-    if shutil.which("numactl"):
-        # Wrap with numactl for optimal memory allocation
-        cmd = ["numactl", "--membind=0", "--"] + cmd
-        print("[*] Using numactl for NUMA-local memory allocation")
 
     proc = start_process(MINER_NAME, cmd, nice=-10, env=env)
     print(f"[OK] SRBMiner started (PID: {proc.pid})")

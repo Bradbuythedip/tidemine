@@ -555,7 +555,24 @@ fi
 if [[ "$AUTO_START" == "true" && -n "$WALLET_ADDRESS" && -n "$SRBMINER_BIN" ]]; then
     info "Starting miner..."
 
-    # Build SRBMiner command as an array for proper argument handling
+    # SRBMiner needs to run from its own directory for config files
+    SRBMINER_DIR=$(dirname "$SRBMINER_BIN")
+    cd "$SRBMINER_DIR"
+
+    # Touch log file first to ensure it exists
+    touch "$LOG_DIR/srbminer.log"
+
+    # Build launch prefix for CPU affinity on hybrid Intel
+    # Use taskset (not SRBMiner's --cpu-affinity which takes hex bitmask)
+    LAUNCH_PREFIX=""
+    if [[ "$IS_HYBRID" == "true" && -n "$P_CORE_LIST" ]]; then
+        LAUNCH_PREFIX="taskset -c $P_CORE_LIST"
+        info "  CPU affinity via taskset: cores [$P_CORE_LIST]"
+    fi
+
+    # Build SRBMiner command as an array
+    # NOTE: yespowertide is CPU-only in v3.2.5 [C---], no need for --disable-gpu
+    # NOTE: --keepalive is a flag, not --keepalive true
     MINER_ARGS=(
         "$SRBMINER_BIN"
         --algorithm yespowertide
@@ -564,39 +581,28 @@ if [[ "$AUTO_START" == "true" && -n "$WALLET_ADDRESS" && -n "$SRBMINER_BIN" ]]; 
         --password "c=TDC"
         --cpu-threads "$OPTIMAL_THREADS"
         --cpu-priority 3
-        --disable-gpu
-        --keepalive true
+        --keepalive
         --retry-time 5
         --api-enable
         --api-port 21550
         --log-file "$LOG_DIR/srbminer.log"
-    )
-
-    # CPU affinity: P-cores only on hybrid Intel
-    if [[ "$IS_HYBRID" == "true" && -n "$P_CORE_LIST" ]]; then
-        MINER_ARGS+=(--cpu-affinity "$P_CORE_LIST")
-        info "  CPU affinity: P-cores [$P_CORE_LIST]"
-    fi
-
-    # Failover pools
-    MINER_ARGS+=(
-        --pool "stratum+tcp://tidepool.world:6243" --wallet "$WALLET_ADDRESS" --password "c=TDC"
-        --pool "stratum+tcp://stratum-na.rplant.xyz:7064" --wallet "$WALLET_ADDRESS" --password "c=TDC"
+        --pool "stratum+tcp://tidepool.world:6243"
+        --wallet "$WALLET_ADDRESS"
+        --password "c=TDC"
+        --pool "stratum+tcp://stratum-na.rplant.xyz:7064"
+        --wallet "$WALLET_ADDRESS"
+        --password "c=TDC"
     )
 
     # Show the command we're about to run
-    info "  Command: ${MINER_ARGS[0]##*/} --algorithm yespowertide --cpu-threads $OPTIMAL_THREADS --disable-gpu"
+    info "  Command: $LAUNCH_PREFIX ${MINER_ARGS[0]##*/} --algorithm yespowertide --cpu-threads $OPTIMAL_THREADS"
 
-    # Start SRBMiner directly (bypass systemd for first run - more reliable)
-    # SRBMiner needs to run from its own directory for config files
-    SRBMINER_DIR=$(dirname "$SRBMINER_BIN")
-    cd "$SRBMINER_DIR"
-
-    # Touch log file first to ensure it exists
-    touch "$LOG_DIR/srbminer.log"
-
-    # Launch with nohup, capturing stderr separately for debugging
-    nohup "${MINER_ARGS[@]}" >> "$LOG_DIR/srbminer.log" 2>&1 &
+    # Launch with nohup
+    if [[ -n "$LAUNCH_PREFIX" ]]; then
+        nohup $LAUNCH_PREFIX "${MINER_ARGS[@]}" >> "$LOG_DIR/srbminer.log" 2>&1 &
+    else
+        nohup "${MINER_ARGS[@]}" >> "$LOG_DIR/srbminer.log" 2>&1 &
+    fi
     MINER_PID=$!
     echo "$MINER_PID" > "$INSTALL_DIR/data/srbminer.pid"
     info "  Launched PID: $MINER_PID"
