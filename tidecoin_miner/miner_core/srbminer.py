@@ -132,6 +132,10 @@ def build_command(cfg: dict, pool_name: Optional[str] = None) -> list[str]:
 
     _mining_cpus, threads = get_mining_cpus(cfg)
 
+    # MINIMAL FLAGS ONLY - SRBMiner on Arrow Lake + Blackwell crashes with
+    # extra flags: --gpu-id, --disable-gpu, --cpu-affinity, --api-enable,
+    # --log-file, --retry-time, --cpu-priority, and failover pools all
+    # cause "intersection without inclusion" crash.
     cmd = [
         str(binary),
         "--algorithm", "yespowertide",
@@ -139,23 +143,8 @@ def build_command(cfg: dict, pool_name: Optional[str] = None) -> list[str]:
         "--wallet", wallet,
         "--password", "c=TDC",
         "--cpu-threads", str(threads),
-        # GPU auto-detected by SRBMiner (do NOT pass --gpu-id, it crashes)
-        # API for monitoring
-        "--api-enable",
-        "--api-port", str(API_PORT),
-        # Logging
-        "--log-file", str(LOG_DIR / "srbminer.log"),
-        # Keepalive for pool connection stability (flag only, no value)
         "--keepalive",
     ]
-
-    # Add failover pools
-    failover_pools = cfg["pool"].get("failover_order", [])
-    for fp in failover_pools:
-        if fp in POOL_REGISTRY and fp != pool:
-            cmd.extend(["--pool", get_pool_url(fp)])
-            cmd.extend(["--wallet", wallet])
-            cmd.extend(["--password", "c=TDC"])
 
     return cmd
 
