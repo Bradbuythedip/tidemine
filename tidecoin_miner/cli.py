@@ -36,11 +36,10 @@ def start(
     wallet: Optional[str] = typer.Option(None, "--wallet", "-w", help="TDC wallet address"),
     pool: Optional[str] = typer.Option(None, "--pool", "-p", help="Pool name"),
     threads: Optional[int] = typer.Option(None, "--threads", "-t", help="CPU threads"),
-    no_gpu: bool = typer.Option(False, "--no-gpu", help="Disable GPU mining"),
     benchmark_first: bool = typer.Option(False, "--benchmark", "-b", help="Run benchmark first"),
     daemon: bool = typer.Option(False, "--daemon", "-d", help="Run in daemon mode (no dashboard)"),
 ):
-    """Start mining with CPU + GPU."""
+    """Start CPU mining (YesPowerTide is CPU-only, GPU-resistant by design)."""
     from tidecoin_miner.miner_core import srbminer
     from tidecoin_miner.optimizer.hugepages import setup_hugepages
     from tidecoin_miner.optimizer.tuner import apply_all_optimizations
@@ -57,8 +56,6 @@ def start(
         save_config(cfg)
     if threads:
         cfg["mining"]["cpu_threads"] = threads
-    if no_gpu:
-        cfg["mining"]["gpu_enabled"] = False
 
     if not cfg["wallet"]["address"]:
         console.print("[bold red]Error:[/] Wallet address required. Use --wallet or set in config.")
@@ -110,7 +107,8 @@ def start(
         while running:
             try:
                 # Health check loop
-                if not srbminer.is_running("srbminer"):
+                from tidecoin_miner.miner_core.process import is_running as _is_running
+                if not _is_running("srbminer"):
                     console.print("[yellow]Miner stopped unexpectedly. Restarting...[/]")
                     srbminer.start(cfg, failover.current_pool or pool_name)
 
@@ -157,7 +155,6 @@ def status():
     if st["running"]:
         hr = srb.get_hashrate()
         shares = srb.get_shares()
-        gpu = srb.get_gpu_info()
 
         table = Table(title="Tidemine Status", show_header=False)
         table.add_column("Metric", style="cyan")
@@ -165,14 +162,11 @@ def status():
 
         table.add_row("Status", "[bold green]MINING[/]")
         table.add_row("PID", str(st["process"]["pid"]) if st["process"] else "?")
+        table.add_row("Mode", "CPU-only (YesPowerTide)")
         table.add_row("CPU Hashrate", f"{hr['cpu']:.1f} H/s")
-        table.add_row("GPU Hashrate", f"{hr['gpu']:.1f} H/s")
-        table.add_row("Total Hashrate", f"{hr['total']:.1f} H/s")
         table.add_row("Accepted Shares", str(shares.get("accepted", 0)))
         table.add_row("Rejected Shares", str(shares.get("rejected", 0)))
-        if gpu:
-            table.add_row("GPU Temp", f"{gpu.get('temperature', 0)}C")
-            table.add_row("GPU Power", f"{gpu.get('power', 0)}W")
+        table.add_row("Stale Shares", str(shares.get("stale", 0)))
 
         console.print(table)
     else:

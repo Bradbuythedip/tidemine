@@ -29,10 +29,11 @@ DEFAULT_CONFIG = {
         "algorithm": "yespowertide",
         "miner": "srbminer",
         "cpu_threads": "auto",
-        "gpu_enabled": True,
-        "gpu_id": 0,
+        "gpu_enabled": False,  # yespowertide is CPU-only in SRBMiner v3.2.4+
         "huge_pages": True,
         "cpu_governor": "performance",
+        "cpu_affinity": "auto",  # auto = P-cores only on hybrid Intel
+        "numa_bind": True,       # Bind to NUMA node 0 for cache locality
     },
     "pool": {
         "primary": "tidecoin_official",
@@ -48,7 +49,6 @@ DEFAULT_CONFIG = {
     },
     "alerts": {
         "hashrate_drop_threshold": 0.5,
-        "gpu_temp_max": 85,
         "cpu_temp_max": 95,
         "notify_on_block_found": True,
     },
