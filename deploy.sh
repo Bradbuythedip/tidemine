@@ -574,6 +574,11 @@ if [[ "$AUTO_START" == "true" && -n "$WALLET_ADDRESS" && -n "$SRBMINER_BIN" ]]; 
     # NOTE: Do NOT pass --gpu-id; SRBMiner auto-detects GPU.
     # Explicit --gpu-id causes "intersection without inclusion" crash.
     # Also avoid --retry-time and other non-essential flags.
+    # MINIMAL FLAGS ONLY - SRBMiner on Arrow Lake + Blackwell crashes with
+    # many flags: --gpu-id, --disable-gpu, --cpu-affinity, --keepalive true,
+    # --retry-time, --cpu-priority, --api-enable, --log-file, failover pools
+    # all cause "intersection without inclusion" crash.
+    # Only these flags are confirmed working from manual testing.
     MINER_ARGS=(
         "$SRBMINER_BIN"
         --algorithm yespowertide
@@ -582,15 +587,6 @@ if [[ "$AUTO_START" == "true" && -n "$WALLET_ADDRESS" && -n "$SRBMINER_BIN" ]]; 
         --password "c=TDC"
         --cpu-threads "$OPTIMAL_THREADS"
         --keepalive
-        --api-enable
-        --api-port 21550
-        --log-file "$LOG_DIR/srbminer.log"
-        --pool "stratum+tcp://tidepool.world:6243"
-        --wallet "$WALLET_ADDRESS"
-        --password "c=TDC"
-        --pool "stratum+tcp://stratum-na.rplant.xyz:7064"
-        --wallet "$WALLET_ADDRESS"
-        --password "c=TDC"
     )
 
     info "  Mode: CPU ($OPTIMAL_THREADS threads) + GPU (auto)"
@@ -606,7 +602,10 @@ if [[ "$AUTO_START" == "true" && -n "$WALLET_ADDRESS" && -n "$SRBMINER_BIN" ]]; 
 #!/usr/bin/env bash
 LAUNCH_EOF
     echo "cd \"$SRBMINER_DIR\"" >> "$LAUNCHER"
-    echo "${MINER_ARGS[*]} 2>&1 | tee -a \"$LOG_DIR/srbminer.log\"" >> "$LAUNCHER"
+    echo "${MINER_ARGS[*]} 2>&1 | tee -a \"$LOG_DIR/srbminer.log\"
+# If miner exits, keep screen open for debugging
+echo 'Miner exited. Press Enter to close.'
+read" >> "$LAUNCHER"
     chmod +x "$LAUNCHER"
 
     # Kill any existing tidemine screen session
