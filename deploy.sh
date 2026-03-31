@@ -223,7 +223,7 @@ sudo apt-get install -y -qq \
     build-essential libssl-dev libffi-dev \
     lm-sensors cpufrequtils numactl \
     libcurl4 libmicrohttpd12 \
-    curl wget git jq \
+    curl wget git jq screen \
     2>/dev/null || warn "Some packages may have failed to install"
 
 ok "System dependencies installed"
@@ -558,6 +558,8 @@ if [[ "$AUTO_START" == "true" && -n "$WALLET_ADDRESS" && -n "$SRBMINER_BIN" ]]; 
 
     # SRBMiner needs to run from its own directory for config files
     SRBMINER_DIR=$(dirname "$SRBMINER_BIN")
+    # Reset cwd first in case we're in a deleted directory
+    cd ~ 2>/dev/null || cd /tmp
     cd "$SRBMINER_DIR"
 
     # Touch log file first to ensure it exists
@@ -595,16 +597,30 @@ if [[ "$AUTO_START" == "true" && -n "$WALLET_ADDRESS" && -n "$SRBMINER_BIN" ]]; 
     info "  Mode: CPU ($OPTIMAL_THREADS threads) + GPU (auto)"
     info "  Command: ${MINER_ARGS[0]##*/} --algorithm yespowertide --cpu-threads $OPTIMAL_THREADS (GPU auto-detect)"
 
-    # Launch with nohup
-    nohup "${MINER_ARGS[@]}" >> "$LOG_DIR/srbminer.log" 2>&1 &
-    MINER_PID=$!
-    echo "$MINER_PID" > "$INSTALL_DIR/data/srbminer.pid"
-    info "  Launched PID: $MINER_PID"
+    # Launch with screen to provide a PTY (SRBMiner requires a terminal)
+    # nohup removes the TTY, causing SRBMiner to exit on warnings that are
+    # non-fatal in a real terminal. screen provides a proper PTY.
+    #
+    # Write a launcher script so arguments with spaces are handled correctly
+    LAUNCHER="$INSTALL_DIR/data/launch_miner.sh"
+    cat > "$LAUNCHER" << 'LAUNCH_EOF'
+#!/usr/bin/env bash
+LAUNCH_EOF
+    echo "cd \"$SRBMINER_DIR\"" >> "$LAUNCHER"
+    echo "${MINER_ARGS[*]} 2>&1 | tee -a \"$LOG_DIR/srbminer.log\"" >> "$LAUNCHER"
+    chmod +x "$LAUNCHER"
+
+    # Kill any existing tidemine screen session
+    screen -S tidemine -X quit 2>/dev/null || true
+    screen -dmS tidemine bash "$LAUNCHER"
+    info "  Launched in screen session 'tidemine'"
 
     # Wait and check if process survived
     sleep 8
 
-    if kill -0 "$MINER_PID" 2>/dev/null; then
+    MINER_PID=$(pgrep -f "SRBMiner-MULTI.*yespowertide" | head -1)
+    if [[ -n "$MINER_PID" ]]; then
+        echo "$MINER_PID" > "$INSTALL_DIR/data/srbminer.pid"
         ok "Miner is running! (PID: $MINER_PID)"
         echo ""
 
@@ -617,6 +633,7 @@ if [[ "$AUTO_START" == "true" && -n "$WALLET_ADDRESS" && -n "$SRBMINER_BIN" ]]; 
 
         echo ""
         echo -e "${BOLD}Commands:${NC}"
+        echo "  screen -r tidemine         # Attach to miner console"
         echo "  tidecoin-miner status      # Check status"
         echo "  tidecoin-miner dashboard   # Live monitoring"
         echo "  tidecoin-miner stop        # Stop mining"
@@ -633,7 +650,7 @@ if [[ "$AUTO_START" == "true" && -n "$WALLET_ADDRESS" && -n "$SRBMINER_BIN" ]]; 
             info "To use it: sudo systemctl start tidemine"
         fi
     else
-        warn "Miner process exited (PID $MINER_PID was not running after 5s)"
+        warn "Miner process not found after 8s"
         echo ""
         echo -e "${RED}--- Debug info ---${NC}"
         if [[ -s "$LOG_DIR/srbminer.log" ]]; then
@@ -641,17 +658,18 @@ if [[ "$AUTO_START" == "true" && -n "$WALLET_ADDRESS" && -n "$SRBMINER_BIN" ]]; 
             cat "$LOG_DIR/srbminer.log" 2>/dev/null
         else
             echo "  No log file output (SRBMiner may have crashed immediately)"
-            echo ""
-            echo "  Try running manually to see the error:"
-            echo "    cd $SRBMINER_DIR"
-            echo "    ./SRBMiner-MULTI --algorithm yespowertide --pool stratum+tcp://$POOL_HOST:$POOL_PORT --wallet $WALLET_ADDRESS --password c=TDC --cpu-threads $OPTIMAL_THREADS --disable-gpu"
         fi
+        echo ""
+        echo "  Screen session status:"
+        screen -ls 2>/dev/null || echo "  (no screen sessions)"
         echo -e "${RED}------------------${NC}"
+        echo ""
+        echo "  Try running manually:"
+        echo "    cd $SRBMINER_DIR && ./SRBMiner-MULTI --algorithm yespowertide --pool stratum+tcp://$POOL_HOST:$POOL_PORT --wallet $WALLET_ADDRESS --password c=TDC --cpu-threads $OPTIMAL_THREADS --keepalive"
         echo ""
         echo "  Common fixes:"
         echo "    1. Missing library: sudo apt install libcurl4 libmicrohttpd12"
         echo "    2. Permission denied: chmod +x $SRBMINER_BIN"
-        echo "    3. Try running manually: cd $SRBMINER_DIR && ./SRBMiner-MULTI --algorithm yespowertide --pool stratum+tcp://$POOL_HOST:$POOL_PORT --wallet $WALLET_ADDRESS --password c=TDC"
     fi
 elif [[ -z "$WALLET_ADDRESS" ]]; then
     echo -e "To start mining:"
