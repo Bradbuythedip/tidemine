@@ -84,8 +84,8 @@ cat << 'BANNER'
      ██║   ██║██████╔╝███████╗██║ ╚═╝ ██║██║██║ ╚████║███████╗
      ╚═╝   ╚═╝╚═════╝ ╚══════╝╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝╚══════╝
 
-  Tidecoin Post-Quantum CPU Miner | Falcon-512 / FN-DSA
-  YesPowerTide | Memory-hard PoW | CPU-Optimized
+  Tidecoin Post-Quantum CPU+GPU Miner | Falcon-512 / FN-DSA
+  YesPowerTide | Memory-hard PoW | Dual CPU+GPU Mining
 
 BANNER
 echo -e "${NC}"
@@ -442,7 +442,8 @@ mining:
   algorithm: yespowertide
   miner: srbminer
   cpu_threads: ${OPTIMAL_THREADS}
-  gpu_enabled: false  # YesPowerTide is CPU-only (GPU removed in SRBMiner v3.2.4)
+  gpu_enabled: true   # GPU mining confirmed working on SRBMiner 3.2.5 (Blackwell/5070Ti)
+  gpu_id: 0
   huge_pages: true
   cpu_governor: performance
   cpu_affinity: auto  # P-cores only on hybrid Intel
@@ -542,7 +543,7 @@ echo -e "  ${CYAN}Hugepages:${NC} $ACTUAL_HP allocated (${ACTUAL_HP}x2MB)"
 echo -e "  ${CYAN}NUMA:${NC}      $NUMA_NODES node(s)"
 echo -e "  ${CYAN}Pool:${NC}      $POOL ($POOL_HOST:$POOL_PORT)"
 echo -e "  ${CYAN}Wallet:${NC}    ${WALLET_ADDRESS:-NOT SET}"
-echo -e "  ${CYAN}Mode:${NC}      CPU-only (YesPowerTide is GPU-resistant by design)"
+echo -e "  ${CYAN}Mode:${NC}      CPU + GPU dual mining (SRBMiner 3.2.5 supports GPU yespowertide)"
 echo ""
 
 if [[ -z "$WALLET_ADDRESS" ]]; then
@@ -562,17 +563,13 @@ if [[ "$AUTO_START" == "true" && -n "$WALLET_ADDRESS" && -n "$SRBMINER_BIN" ]]; 
     # Touch log file first to ensure it exists
     touch "$LOG_DIR/srbminer.log"
 
-    # Build launch prefix for CPU affinity on hybrid Intel
-    # Use taskset (not SRBMiner's --cpu-affinity which takes hex bitmask)
-    LAUNCH_PREFIX=""
-    if [[ "$IS_HYBRID" == "true" && -n "$P_CORE_LIST" ]]; then
-        LAUNCH_PREFIX="taskset -c $P_CORE_LIST"
-        info "  CPU affinity via taskset: cores [$P_CORE_LIST]"
-    fi
+    # NOTE: Do NOT use taskset or cpu-affinity with SRBMiner!
+    # SRBMiner manages both CPU and GPU threads internally.
+    # Process-level affinity (taskset) constrains GPU threads too,
+    # causing "intersection without inclusion" crash.
 
-    # Build SRBMiner command as an array
-    # NOTE: yespowertide is CPU-only in v3.2.5 [C---], no need for --disable-gpu
-    # NOTE: --keepalive is a flag, not --keepalive true
+    # Build SRBMiner command — dual CPU+GPU mining
+    # GPU mining WORKS on SRBMiner 3.2.5 for yespowertide (confirmed on Blackwell/5070Ti)
     MINER_ARGS=(
         "$SRBMINER_BIN"
         --algorithm yespowertide
@@ -580,6 +577,7 @@ if [[ "$AUTO_START" == "true" && -n "$WALLET_ADDRESS" && -n "$SRBMINER_BIN" ]]; 
         --wallet "$WALLET_ADDRESS"
         --password "c=TDC"
         --cpu-threads "$OPTIMAL_THREADS"
+        --gpu-id 0
         --cpu-priority 3
         --keepalive
         --retry-time 5
@@ -594,21 +592,17 @@ if [[ "$AUTO_START" == "true" && -n "$WALLET_ADDRESS" && -n "$SRBMINER_BIN" ]]; 
         --password "c=TDC"
     )
 
-    # Show the command we're about to run
-    info "  Command: $LAUNCH_PREFIX ${MINER_ARGS[0]##*/} --algorithm yespowertide --cpu-threads $OPTIMAL_THREADS"
+    info "  Mode: CPU ($OPTIMAL_THREADS threads) + GPU (auto)"
+    info "  Command: ${MINER_ARGS[0]##*/} --algorithm yespowertide --cpu-threads $OPTIMAL_THREADS --gpu-id 0"
 
     # Launch with nohup
-    if [[ -n "$LAUNCH_PREFIX" ]]; then
-        nohup $LAUNCH_PREFIX "${MINER_ARGS[@]}" >> "$LOG_DIR/srbminer.log" 2>&1 &
-    else
-        nohup "${MINER_ARGS[@]}" >> "$LOG_DIR/srbminer.log" 2>&1 &
-    fi
+    nohup "${MINER_ARGS[@]}" >> "$LOG_DIR/srbminer.log" 2>&1 &
     MINER_PID=$!
     echo "$MINER_PID" > "$INSTALL_DIR/data/srbminer.pid"
     info "  Launched PID: $MINER_PID"
 
     # Wait and check if process survived
-    sleep 5
+    sleep 8
 
     if kill -0 "$MINER_PID" 2>/dev/null; then
         ok "Miner is running! (PID: $MINER_PID)"
@@ -657,7 +651,7 @@ if [[ "$AUTO_START" == "true" && -n "$WALLET_ADDRESS" && -n "$SRBMINER_BIN" ]]; 
         echo "  Common fixes:"
         echo "    1. Missing library: sudo apt install libcurl4 libmicrohttpd12"
         echo "    2. Permission denied: chmod +x $SRBMINER_BIN"
-        echo "    3. Try without --disable-gpu if SRBMiner version doesn't support it"
+        echo "    3. Try running manually: cd $SRBMINER_DIR && ./SRBMiner-MULTI --algorithm yespowertide --pool stratum+tcp://$POOL_HOST:$POOL_PORT --wallet $WALLET_ADDRESS --password c=TDC"
     fi
 elif [[ -z "$WALLET_ADDRESS" ]]; then
     echo -e "To start mining:"

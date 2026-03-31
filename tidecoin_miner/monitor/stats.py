@@ -6,7 +6,7 @@ from typing import Optional
 
 import psutil
 
-from tidecoin_miner.miner_core.srbminer import get_api_stats, get_hashrate, get_shares
+from tidecoin_miner.miner_core.srbminer import get_api_stats, get_hashrate, get_shares, get_gpu_info
 
 
 class StatsCollector:
@@ -26,6 +26,7 @@ class StatsCollector:
         """Collect a full snapshot of all metrics."""
         hr = get_hashrate()
         shares = get_shares()
+        gpu = get_gpu_info()
         cpu_temps = self._get_cpu_temps()
         cpu_usage = psutil.cpu_percent(percpu=True)
 
@@ -34,6 +35,7 @@ class StatsCollector:
             "uptime": time.time() - self.start_time,
             "hashrate": hr,
             "shares": shares,
+            "gpu": gpu,
             "cpu": {
                 "temps": cpu_temps,
                 "usage": cpu_usage,
@@ -45,11 +47,13 @@ class StatsCollector:
                 "used_gb": round(psutil.virtual_memory().used / (1024**3), 1),
                 "percent": psutil.virtual_memory().percent,
             },
-            "power_efficiency": self._calc_efficiency(hr),
+            "power_efficiency": self._calc_efficiency(hr, gpu),
         }
 
         # Update histories
         self.hashrate_history.append(hr["total"])
+        if gpu:
+            self.gpu_temp_history.append(gpu.get("temperature", 0))
         if cpu_temps:
             self.cpu_temp_history.append(max(cpu_temps) if cpu_temps else 0)
 
@@ -102,17 +106,18 @@ class StatsCollector:
             }
         return {"current": 0, "max": 0}
 
-    def _calc_efficiency(self, hashrate: dict) -> float:
-        """Calculate hashes per watt (CPU-only estimate)."""
+    def _calc_efficiency(self, hashrate: dict, gpu: Optional[dict]) -> float:
+        """Calculate hashes per watt."""
         total_hr = hashrate.get("total", 0)
         if total_hr == 0:
             return 0
 
-        # Estimate CPU power (rough: ~10W per active core for i9 under load)
+        gpu_power = gpu.get("power", 0) if gpu else 0
         cpu_cores = psutil.cpu_count(logical=False) or 8
         cpu_power = cpu_cores * 10  # Rough estimate
 
-        if cpu_power == 0:
+        total_power = gpu_power + cpu_power
+        if total_power == 0:
             return 0
 
-        return round(total_hr / cpu_power, 3)
+        return round(total_hr / total_power, 3)
