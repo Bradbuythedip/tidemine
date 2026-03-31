@@ -139,19 +139,14 @@ def build_command(cfg: dict, pool_name: Optional[str] = None) -> list[str]:
         "--wallet", wallet,
         "--password", "c=TDC",
         "--cpu-threads", str(threads),
-        # Enable GPU mining (confirmed working on SRBMiner 3.2.5 + Blackwell)
-        "--gpu-id", str(cfg["mining"].get("gpu_id", 0)),
+        # GPU auto-detected by SRBMiner (do NOT pass --gpu-id, it crashes)
         # API for monitoring
         "--api-enable",
         "--api-port", str(API_PORT),
         # Logging
         "--log-file", str(LOG_DIR / "srbminer.log"),
-        # CPU priority (3 = above normal)
-        "--cpu-priority", "3",
         # Keepalive for pool connection stability (flag only, no value)
         "--keepalive",
-        # Fast reconnect on disconnect
-        "--retry-time", "5",
     ]
 
     # Add failover pools

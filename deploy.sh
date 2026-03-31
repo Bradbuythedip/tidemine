@@ -570,6 +570,9 @@ if [[ "$AUTO_START" == "true" && -n "$WALLET_ADDRESS" && -n "$SRBMINER_BIN" ]]; 
 
     # Build SRBMiner command — dual CPU+GPU mining
     # GPU mining WORKS on SRBMiner 3.2.5 for yespowertide (confirmed on Blackwell/5070Ti)
+    # NOTE: Do NOT pass --gpu-id; SRBMiner auto-detects GPU.
+    # Explicit --gpu-id causes "intersection without inclusion" crash.
+    # Also avoid --retry-time and other non-essential flags.
     MINER_ARGS=(
         "$SRBMINER_BIN"
         --algorithm yespowertide
@@ -577,10 +580,7 @@ if [[ "$AUTO_START" == "true" && -n "$WALLET_ADDRESS" && -n "$SRBMINER_BIN" ]]; 
         --wallet "$WALLET_ADDRESS"
         --password "c=TDC"
         --cpu-threads "$OPTIMAL_THREADS"
-        --gpu-id 0
-        --cpu-priority 3
         --keepalive
-        --retry-time 5
         --api-enable
         --api-port 21550
         --log-file "$LOG_DIR/srbminer.log"
@@ -593,7 +593,7 @@ if [[ "$AUTO_START" == "true" && -n "$WALLET_ADDRESS" && -n "$SRBMINER_BIN" ]]; 
     )
 
     info "  Mode: CPU ($OPTIMAL_THREADS threads) + GPU (auto)"
-    info "  Command: ${MINER_ARGS[0]##*/} --algorithm yespowertide --cpu-threads $OPTIMAL_THREADS --gpu-id 0"
+    info "  Command: ${MINER_ARGS[0]##*/} --algorithm yespowertide --cpu-threads $OPTIMAL_THREADS (GPU auto-detect)"
 
     # Launch with nohup
     nohup "${MINER_ARGS[@]}" >> "$LOG_DIR/srbminer.log" 2>&1 &
