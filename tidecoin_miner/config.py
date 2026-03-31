@@ -29,7 +29,8 @@ DEFAULT_CONFIG = {
         "algorithm": "yespowertide",
         "miner": "srbminer",
         "cpu_threads": "auto",
-        "gpu_enabled": False,  # yespowertide is CPU-only in SRBMiner v3.2.4+
+        "gpu_enabled": True,   # GPU mining works on SRBMiner 3.2.5 (confirmed Blackwell/5070Ti)
+        "gpu_id": 0,
         "huge_pages": True,
         "cpu_governor": "performance",
         "cpu_affinity": "auto",  # auto = P-cores only on hybrid Intel

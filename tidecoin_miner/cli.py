@@ -160,13 +160,18 @@ def status():
         table.add_column("Metric", style="cyan")
         table.add_column("Value", style="bold")
 
+        gpu = srb.get_gpu_info()
         table.add_row("Status", "[bold green]MINING[/]")
         table.add_row("PID", str(st["process"]["pid"]) if st["process"] else "?")
-        table.add_row("Mode", "CPU-only (YesPowerTide)")
+        table.add_row("Mode", "CPU + GPU")
         table.add_row("CPU Hashrate", f"{hr['cpu']:.1f} H/s")
+        table.add_row("GPU Hashrate", f"{hr.get('gpu', 0):.1f} H/s")
+        table.add_row("Total Hashrate", f"[bold]{hr['total']:.1f} H/s[/]")
         table.add_row("Accepted Shares", str(shares.get("accepted", 0)))
         table.add_row("Rejected Shares", str(shares.get("rejected", 0)))
-        table.add_row("Stale Shares", str(shares.get("stale", 0)))
+        if gpu:
+            table.add_row("GPU Temp", f"{gpu.get('temperature', 0)}C")
+            table.add_row("GPU Power", f"{gpu.get('power', 0)}W")
 
         console.print(table)
     else:

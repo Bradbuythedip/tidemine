@@ -1,9 +1,9 @@
-"""SRBMiner-MULTI process manager optimized for CPU-only YesPowerTide mining.
+"""SRBMiner-MULTI process manager for dual CPU+GPU YesPowerTide mining.
 
-NOTE: As of SRBMiner-MULTI v3.2.4, yespowertide is CPU-only [C - - -].
-GPU support was briefly added in v3.1.9 "just for fun" and subsequently removed.
-YesPowerTide is architecturally designed to resist GPU acceleration via heavy
-L2 cache dependency and computation latency hardening.
+GPU mining for yespowertide IS supported in SRBMiner 3.2.5, confirmed on
+NVIDIA Blackwell (RTX 5070 Ti Laptop). GPU provides ~3700 H/s alongside
+CPU ~1500 H/s per thread. Do NOT use taskset or process-level CPU affinity
+as it constrains GPU thread scheduling and causes crashes.
 """
 
 import json
@@ -114,10 +114,11 @@ def get_mining_cpus(cfg: dict) -> tuple[list[int], int]:
 
 
 def build_command(cfg: dict, pool_name: Optional[str] = None) -> list[str]:
-    """Build SRBMiner command line with all CPU optimizations.
+    """Build SRBMiner command line for dual CPU+GPU mining.
 
-    YesPowerTide is CPU-only as of SRBMiner v3.2.4.
-    GPU is disabled since the algorithm resists GPU acceleration.
+    GPU mining for yespowertide IS supported in SRBMiner 3.2.5,
+    confirmed on NVIDIA Blackwell (RTX 5070 Ti). Do NOT use taskset
+    or process-level affinity - it breaks GPU thread scheduling.
     """
     binary = get_srbminer_path()
     if not binary.exists():
@@ -129,7 +130,7 @@ def build_command(cfg: dict, pool_name: Optional[str] = None) -> list[str]:
     if not wallet:
         raise ValueError("Wallet address not configured. Set it in ~/.tidecoin-miner/config.yaml")
 
-    mining_cpus, threads = get_mining_cpus(cfg)
+    _mining_cpus, threads = get_mining_cpus(cfg)
 
     cmd = [
         str(binary),
@@ -138,8 +139,8 @@ def build_command(cfg: dict, pool_name: Optional[str] = None) -> list[str]:
         "--wallet", wallet,
         "--password", "c=TDC",
         "--cpu-threads", str(threads),
-        # yespowertide is already CPU-only [C---] in v3.2.4+
-        # Do NOT pass --disable-gpu (causes crash on some versions)
+        # Enable GPU mining (confirmed working on SRBMiner 3.2.5 + Blackwell)
+        "--gpu-id", str(cfg["mining"].get("gpu_id", 0)),
         # API for monitoring
         "--api-enable",
         "--api-port", str(API_PORT),
@@ -165,23 +166,19 @@ def build_command(cfg: dict, pool_name: Optional[str] = None) -> list[str]:
 
 
 def start(cfg: Optional[dict] = None, pool_name: Optional[str] = None) -> int:
-    """Start SRBMiner with optimal CPU configuration."""
+    """Start SRBMiner with dual CPU+GPU mining."""
     if cfg is None:
         cfg = load_config()
 
     cmd = build_command(cfg, pool_name)
 
-    mining_cpus, threads = get_mining_cpus(cfg)
+    _mining_cpus, threads = get_mining_cpus(cfg)
 
-    # Use taskset for CPU affinity (P-cores only on hybrid Intel)
-    # SRBMiner's --cpu-affinity takes hex bitmask which is error-prone;
-    # taskset -c with comma-separated IDs is simpler and more reliable
-    if mining_cpus and shutil.which("taskset"):
-        cpu_str = ",".join(str(c) for c in mining_cpus)
-        cmd = ["taskset", "-c", cpu_str] + cmd
-        print(f"[*] CPU affinity via taskset: cores [{cpu_str}]")
+    # NOTE: Do NOT use taskset or process-level CPU affinity!
+    # SRBMiner manages both CPU and GPU threads internally.
+    # taskset constrains GPU threads too, causing crashes.
 
-    print(f"[*] Starting SRBMiner ({threads} threads, CPU-only)...")
+    print(f"[*] Starting SRBMiner ({threads} CPU threads + GPU)...")
 
     env = {}
 
@@ -237,23 +234,45 @@ def get_api_stats() -> Optional[dict]:
 
 
 def get_hashrate() -> dict:
-    """Get current hashrate (CPU-only for YesPowerTide)."""
+    """Get current hashrate breakdown (CPU + GPU)."""
     stats = get_api_stats()
     if not stats:
-        return {"cpu": 0.0, "total": 0.0}
+        return {"cpu": 0.0, "gpu": 0.0, "total": 0.0}
 
     try:
         algo = stats["algorithms"][0]
         cpu_hr = algo.get("hashrate", {}).get("cpu", {}).get("total", 0.0)
-        # Also check top-level hashrate field
-        if cpu_hr == 0:
-            cpu_hr = algo.get("hashrate", {}).get("total", 0.0)
+        gpu_hr = algo.get("hashrate", {}).get("gpu", {}).get("total", 0.0)
+        # Fallback: check top-level hashrate
+        if cpu_hr == 0 and gpu_hr == 0:
+            total = algo.get("hashrate", {}).get("total", 0.0)
+            return {"cpu": 0.0, "gpu": 0.0, "total": total}
         return {
             "cpu": cpu_hr,
-            "total": cpu_hr,
+            "gpu": gpu_hr,
+            "total": cpu_hr + gpu_hr,
         }
     except (KeyError, IndexError):
-        return {"cpu": 0.0, "total": 0.0}
+        return {"cpu": 0.0, "gpu": 0.0, "total": 0.0}
+
+
+def get_gpu_info() -> Optional[dict]:
+    """Get GPU telemetry from SRBMiner API."""
+    stats = get_api_stats()
+    if not stats:
+        return None
+
+    try:
+        gpu = stats["gpu_devices"][0]
+        return {
+            "temperature": gpu.get("temperature", 0),
+            "power": gpu.get("power", 0),
+            "fan_speed": gpu.get("fan_speed", 0),
+            "clock_core": gpu.get("clock_core", 0),
+            "clock_memory": gpu.get("clock_memory", 0),
+        }
+    except (KeyError, IndexError):
+        return None
 
 
 def get_shares() -> dict:
