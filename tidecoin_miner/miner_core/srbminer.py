@@ -141,7 +141,7 @@ def build_command(cfg: dict, pool_name: Optional[str] = None) -> list[str]:
         "--algorithm", "yespowertide",
         "--pool", pool_url,
         "--wallet", wallet,
-        "--password", "c=TDC",
+        "--password", "d=0.3,c=TDC",
         "--cpu-threads", str(threads),
         "--keepalive",
     ]
