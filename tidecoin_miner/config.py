@@ -12,12 +12,10 @@ LOG_DIR = BASE_DIR / "logs"
 DATA_DIR = BASE_DIR / "data"
 
 POOL_REGISTRY = {
-    "tidecoin_official": {"host": "pool.tidecoin.exchange", "port": 3032, "fee": "1%"},
-    "tidepool_world":    {"host": "tidepool.world",         "port": 6243, "fee": "1%"},
-    "rplant_na":         {"host": "stratum-na.rplant.xyz",  "port": 7064, "fee": "1%"},
-    "rplant_eu":         {"host": "stratum-eu.rplant.xyz",  "port": 7064, "fee": "1%"},
-    "zpool":             {"host": "yespowertide.mine.zpool.ca", "port": 6243, "fee": "dynamic"},
-    "zergpool":          {"host": "yespowertide.mine.zergpool.com", "port": 6243, "fee": "dynamic"},
+    "tidecoin_official": {"host": "eu1-pool.tidecoin.exchange", "port": 3033, "fee": "1%"},
+    "zpool_na":          {"host": "yespowerTIDE.na.mine.zpool.ca", "port": 6243, "fee": "~1%"},
+    "zpool_eu":          {"host": "yespowerTIDE.eu.mine.zpool.ca", "port": 6243, "fee": "~1%"},
+    "aikapool":          {"host": "stratum.aikapool.com",          "port": 3940, "fee": "0.5%"},
 }
 
 DEFAULT_CONFIG = {
@@ -38,7 +36,7 @@ DEFAULT_CONFIG = {
     },
     "pool": {
         "primary": "tidecoin_official",
-        "failover_order": ["tidepool_world", "rplant_na", "zpool"],
+        "failover_order": ["zpool_na", "zpool_eu"],
         "max_stale_rate": 0.03,
         "health_check_interval": 30,
     },

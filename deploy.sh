@@ -422,15 +422,13 @@ info "Step 7/8: Writing configuration..."
 
 # Resolve pool details
 declare -A POOL_HOSTS POOL_PORTS
-POOL_HOSTS[tidecoin_official]="pool.tidecoin.exchange"; POOL_PORTS[tidecoin_official]=3032
-POOL_HOSTS[tidepool_world]="tidepool.world";            POOL_PORTS[tidepool_world]=6243
-POOL_HOSTS[rplant_na]="stratum-na.rplant.xyz";          POOL_PORTS[rplant_na]=7064
-POOL_HOSTS[rplant_eu]="stratum-eu.rplant.xyz";          POOL_PORTS[rplant_eu]=7064
-POOL_HOSTS[zpool]="yespowertide.mine.zpool.ca";         POOL_PORTS[zpool]=6243
-POOL_HOSTS[zergpool]="yespowertide.mine.zergpool.com";  POOL_PORTS[zergpool]=6243
+POOL_HOSTS[tidecoin_official]="eu1-pool.tidecoin.exchange"; POOL_PORTS[tidecoin_official]=3033
+POOL_HOSTS[zpool_na]="yespowerTIDE.na.mine.zpool.ca";     POOL_PORTS[zpool_na]=6243
+POOL_HOSTS[zpool_eu]="yespowerTIDE.eu.mine.zpool.ca";     POOL_PORTS[zpool_eu]=6243
+POOL_HOSTS[aikapool]="stratum.aikapool.com";               POOL_PORTS[aikapool]=3940
 
-POOL_HOST="${POOL_HOSTS[$POOL]:-pool.tidecoin.exchange}"
-POOL_PORT="${POOL_PORTS[$POOL]:-3032}"
+POOL_HOST="${POOL_HOSTS[$POOL]:-eu1-pool.tidecoin.exchange}"
+POOL_PORT="${POOL_PORTS[$POOL]:-3033}"
 
 cat > "$INSTALL_DIR/config.yaml" << CONFIG_EOF
 wallet:
@@ -584,7 +582,7 @@ if [[ "$AUTO_START" == "true" && -n "$WALLET_ADDRESS" && -n "$SRBMINER_BIN" ]]; 
         --algorithm yespowertide
         --pool "stratum+tcp://$POOL_HOST:$POOL_PORT"
         --wallet "$WALLET_ADDRESS"
-        --password "c=TDC"
+        --password "d=0.3,c=TDC"
         --cpu-threads "$OPTIMAL_THREADS"
         --keepalive
     )
@@ -628,15 +626,13 @@ if [[ "$AUTO_START" == "true" && -n "$WALLET_ADDRESS" && -n "$SRBMINER_BIN" ]]; 
 
         echo ""
         echo -e "${BOLD}Commands:${NC}"
-        echo "  tidecoin-miner status      # Check status"
-        echo "  tidecoin-miner dashboard   # Live monitoring"
-        echo "  tidecoin-miner stop        # Stop mining"
-        echo "  tidecoin-miner benchmark   # Auto-tune threads"
-        echo "  tidecoin-miner pools       # Test pool latency"
-        echo "  tail -f $LOG_DIR/srbminer.log  # View logs"
+        echo "  sudo tail -f $LOG_DIR/srbminer.log                              # Full log"
+        echo "  sudo tail -f $LOG_DIR/srbminer.log | grep -i 'H/s\|block\|Total'  # Hashrate + blocks"
+        echo "  sudo pkill -f SRBMiner-MULTI                                     # Stop mining"
         echo ""
-        echo -e "${BOLD}Metrics API:${NC} http://localhost:8420"
-        echo -e "${BOLD}SRBMiner API:${NC} http://localhost:21550"
+        echo -e "${BOLD}Check rewards:${NC}"
+        echo "  Explorer: https://explorer.tidecoin.org (search your wallet)"
+        echo "  Pool:     https://t.me/pool_tidecoin_exchange"
 
         # Now also start the systemd service for future auto-restart
         if [[ "$INSTALL_SERVICE" == "true" ]]; then
@@ -659,7 +655,7 @@ if [[ "$AUTO_START" == "true" && -n "$WALLET_ADDRESS" && -n "$SRBMINER_BIN" ]]; 
         echo -e "${RED}------------------${NC}"
         echo ""
         echo "  Try running manually:"
-        echo "    cd $SRBMINER_DIR && ./SRBMiner-MULTI --algorithm yespowertide --pool stratum+tcp://$POOL_HOST:$POOL_PORT --wallet $WALLET_ADDRESS --password c=TDC --cpu-threads $OPTIMAL_THREADS --keepalive"
+        echo "    cd $SRBMINER_DIR && ./SRBMiner-MULTI --algorithm yespowertide --pool stratum+tcp://$POOL_HOST:$POOL_PORT --wallet $WALLET_ADDRESS --password d=0.3,c=TDC --cpu-threads $OPTIMAL_THREADS --keepalive"
         echo ""
         echo "  Common fixes:"
         echo "    1. Missing library: sudo apt install libcurl4 libmicrohttpd12"
@@ -688,3 +684,11 @@ echo "  [8] Hybrid CPU: P-cores only (E-cores idle)"
 fi
 echo ""
 echo -e "${CYAN}Happy mining! Falcon-512 post-quantum security.${NC}"
+
+# Live tail the log so user can see mining activity
+if [[ -n "$MINER_PID" ]] && kill -0 "$MINER_PID" 2>/dev/null; then
+    echo ""
+    echo -e "${BOLD}=== Live mining output (Ctrl+C to detach, miner keeps running) ===${NC}"
+    echo ""
+    tail -f "$LOG_DIR/srbminer.log" | grep --line-buffered -i "block\|found\|Total:\|H/s\|share accepted\|share rejected\|BLOCK"
+fi
